@@ -15,6 +15,22 @@ Attributes
 The following sections describe the attributes available on each
 instance.
 
+.. _config_type_python_packaging_policy_allow_files:
+
+``allow_files``
+---------------
+
+(``bool``)
+
+Whether to allow the collection of generic *file* resources.
+
+If false, all collected/packaged resources must be instances of
+concrete resource types (``PythonModuleSource``, ``PythonPackageResource``,
+etc).
+
+If true, :ref:`config_type_file` instances can be added to resource
+collectors.
+
 .. _config_type_python_packaging_policy_allow_in_memory_shared_library_loading:
 
 ``allow_in_memory_shared_library_loading``
@@ -99,6 +115,63 @@ The following values are recognized:
 
 Default is ``all``.
 
+.. _config_type_python_packaging_policy_file_scanner_classify_files:
+
+``file_scanner_classify_files``
+-------------------------------
+
+(``bool``)
+
+Whether file scanning should attempt to classify files and emit typed
+resources corresponding to the detected file type.
+
+If ``True``, operations that emit resource objects (such as
+:ref:`config_python_executable_pip_install`) will emit specific
+types for each resource flavor. e.g. :ref:`config_type_python_module_source`,
+:ref:`config_type_python_extension_module`, etc.
+
+If ``False``, the file scanner does not attempt to classify the type of
+a file and this rich resource types are not emitted.
+
+Can be used in conjunction with
+:ref:`config_type_python_packaging_policy_file_scanner_emit_files`. If both
+are ``True``, there will be a :ref:`config_type_file` and an optional non-file
+resource for each source file.
+
+Default is ``True``.
+
+.. _config_type_python_packaging_policy_file_scanner_emit_files:
+
+``file_scanner_emit_files``
+---------------------------
+
+(``bool``)
+
+Whether file scanning should emit file resources for each seen file.
+
+If ``True``, operations that emit resource objects (such as
+:ref:`config_python_executable_pip_install`) will emit
+:ref:`config_type_file` instances for each encountered file.
+
+If ``False``, :ref:`config_type_file` instances will not be emitted.
+
+Can be used in conjunction with
+:ref:`config_type_python_packaging_policy_file_scanner_classify_files`.
+
+Default is ``False``.
+
+.. _config_type_python_packaging_policy_include_classified_resources:
+
+``include_classified_resources``
+--------------------------------
+
+(``bool``)
+
+Whether strongly typed, classified non-``File`` resources have their
+``add_include`` attribute set to ``True`` by default.
+
+Default is ``True``.
+
 .. _config_type_python_packaging_policy_include_distribution_sources:
 
 ``include_distribution_sources``
@@ -120,6 +193,18 @@ Default is ``True``.
 
 Whether to add Python package resources for Python packages
 in the Python distribution.
+
+Default is ``False``.
+
+.. _config_type_python_packaging_policy_include_file_resources:
+
+``include_file_resources``
+--------------------------
+
+(``bool``)
+
+Whether :ref:`config_type_file` resources have their ``add_include`` attribute
+set to ``True`` by default.
 
 Default is ``False``.
 
@@ -159,6 +244,9 @@ The location that resources should be added to by default.
 Default is ``in-memory``.
 
 .. _config_type_python_packaging_policy_resources_location_fallback:
+
+``resources_location_fallback``
+-------------------------------
 
 (``string`` or ``None``)
 
@@ -214,3 +302,33 @@ above for more.
 
 It accepts 2 ``string`` arguments defining the extension module name
 and its preferred variant.
+
+.. _config_type_python_packaging_policy_set_resource_handling_mode:
+
+``PythonPackagingPolicy.set_resource_handling_mode()``
+------------------------------------------------------
+
+This method takes a string argument denoting the *resource handling mode*
+to apply to the policy. This string can have the following values:
+
+``classify``
+   Files are classified as typed resources and handled as such.
+
+   Only classified resources can be added by default.
+
+``files``
+   Files are handled as raw files (as opposed to typed resources).
+
+   Only files can be added by default.
+
+This method is effectively a convenience method for bulk-setting
+multiple attributes on the instance given a behavior mode.
+
+``classify`` will configure the file scanner to emit classified resources,
+configure the ``add_include`` attribute to only be ``True`` on classified
+resources, and will disable the addition of ``File`` resources on resource
+collectors.
+
+``files`` will configure the file scanner to only emit ``File`` resources,
+configure the ``add_include`` attribute to ``True`` on ``File`` and *classified*
+resources, and will allow resource collectors to add ``File`` instances.

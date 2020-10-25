@@ -27,7 +27,7 @@ use {
         location::AbstractResourceLocation,
         policy::PythonPackagingPolicy,
         resource::{
-            DataLocation, PythonExtensionModule, PythonModuleSource,
+            DataLocation, FileData, PythonExtensionModule, PythonModuleSource,
             PythonPackageDistributionResource, PythonPackageResource, PythonResource,
         },
         resource_collection::{
@@ -76,10 +76,10 @@ pub struct StandalonePythonExecutableBuilder {
     exe_name: String,
 
     /// The Python distribution being used to build this executable.
-    host_distribution: Arc<Box<dyn PythonDistribution>>,
+    host_distribution: Arc<dyn PythonDistribution>,
 
     /// The Python distribution this executable is targeting.
-    target_distribution: Arc<Box<StandaloneDistribution>>,
+    target_distribution: Arc<StandaloneDistribution>,
 
     /// How libpython should be linked.
     link_mode: LibpythonLinkMode,
@@ -108,13 +108,19 @@ pub struct StandalonePythonExecutableBuilder {
 
     /// Path to python executable that can be invoked at build time.
     host_python_exe: PathBuf,
+
+    /// Value for the `windows_subsystem` Rust attribute for generated Rust projects.
+    windows_subsystem: String,
+
+    /// Path to install tcl/tk files into.
+    tcl_files_path: Option<String>,
 }
 
 impl StandalonePythonExecutableBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn from_distribution(
-        host_distribution: Arc<Box<dyn PythonDistribution>>,
-        target_distribution: Arc<Box<StandaloneDistribution>>,
+        host_distribution: Arc<dyn PythonDistribution>,
+        target_distribution: Arc<StandaloneDistribution>,
         host_triple: String,
         target_triple: String,
         exe_name: String,
@@ -195,12 +201,15 @@ impl StandalonePythonExecutableBuilder {
                 allowed_locations,
                 allowed_extension_module_locations,
                 allow_new_builtin_extension_modules,
+                packaging_policy.allow_files(),
                 &cache_tag,
             ),
             core_build_context: LibPythonBuildContext::default(),
             extension_build_contexts: BTreeMap::new(),
             config,
             host_python_exe,
+            windows_subsystem: "console".to_string(),
+            tcl_files_path: None,
         });
 
         builder.add_distribution_core_state()?;
@@ -351,8 +360,8 @@ impl StandalonePythonExecutableBuilder {
 }
 
 impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
-    fn clone_box(&self) -> Box<dyn PythonBinaryBuilder> {
-        Box::new(self.clone())
+    fn clone_trait(&self) -> Arc<dyn PythonBinaryBuilder> {
+        Arc::new(self.clone())
     }
 
     fn name(&self) -> String {
@@ -379,6 +388,36 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         &self.target_distribution.python_exe_path()
     }
 
+    fn windows_subsystem(&self) -> &str {
+        &self.windows_subsystem
+    }
+
+    fn set_windows_subsystem(&mut self, value: &str) -> Result<()> {
+        self.windows_subsystem = value.to_string();
+
+        Ok(())
+    }
+
+    fn tcl_files_path(&self) -> &Option<String> {
+        &self.tcl_files_path
+    }
+
+    fn set_tcl_files_path(&mut self, value: Option<String>) {
+        self.tcl_files_path = value;
+
+        self.config.tcl_library = if let Some(path) = &self.tcl_files_path {
+            Some(
+                PathBuf::from("$ORIGIN").join(path).join(
+                    self.target_distribution
+                        .tcl_library_path_directory()
+                        .expect("should have a tcl library path directory"),
+                ),
+            )
+        } else {
+            None
+        };
+    }
+
     fn iter_resources<'a>(
         &'a self,
     ) -> Box<dyn Iterator<Item = (&'a String, &'a PrePackagedResource)> + 'a> {
@@ -393,8 +432,9 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
     ) -> Result<Vec<PythonResource>> {
         pip_download(
             logger,
-            &**self.host_distribution,
-            &**self.target_distribution,
+            &*self.host_distribution,
+            &*self.target_distribution,
+            self.python_packaging_policy(),
             verbose,
             args,
         )
@@ -409,7 +449,8 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
     ) -> Result<Vec<PythonResource>> {
         pip_install(
             logger,
-            &**self.target_distribution,
+            &*self.target_distribution,
+            self.python_packaging_policy(),
             self.link_mode,
             verbose,
             install_args,
@@ -423,20 +464,29 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         path: &Path,
         packages: &[String],
     ) -> Result<Vec<PythonResource>> {
-        Ok(find_resources(&**self.target_distribution, path, None)?
-            .iter()
-            .filter_map(|x| {
-                if x.is_in_packages(packages) {
-                    Some(x.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>())
+        Ok(find_resources(
+            &*self.target_distribution,
+            self.python_packaging_policy(),
+            path,
+            None,
+        )?
+        .iter()
+        .filter_map(|x| {
+            if x.is_in_packages(packages) {
+                Some(x.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>())
     }
 
     fn read_virtualenv(&self, _logger: &slog::Logger, path: &Path) -> Result<Vec<PythonResource>> {
-        read_virtualenv(&**self.target_distribution, path)
+        read_virtualenv(
+            &*self.target_distribution,
+            self.python_packaging_policy(),
+            path,
+        )
     }
 
     fn setup_py_install(
@@ -449,7 +499,8 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
     ) -> Result<Vec<PythonResource>> {
         setup_py_install(
             logger,
-            &**self.target_distribution,
+            &*self.target_distribution,
+            self.python_packaging_policy(),
             self.link_mode,
             package_path,
             verbose,
@@ -462,6 +513,7 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         &mut self,
         callback: Option<ResourceAddCollectionContextCallback>,
     ) -> Result<()> {
+        // TODO consolidate into loop below.
         for ext in self.packaging_policy.resolve_python_extension_modules(
             self.target_distribution.extension_modules.values(),
             &self.target_triple,
@@ -478,30 +530,39 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
             self.add_python_extension_module(&ext, Some(add_context))?;
         }
 
-        for source in self.target_distribution.source_modules()? {
-            let resource = (&source).into();
+        for resource in self
+            .target_distribution
+            .python_resources()
+            .iter()
+            .filter(|r| match r {
+                PythonResource::ModuleSource(_) => true,
+                PythonResource::PackageResource(_) => true,
+                PythonResource::ModuleBytecode(_) => false,
+                PythonResource::ModuleBytecodeRequest(_) => false,
+                PythonResource::ExtensionModule(_) => false,
+                PythonResource::PackageDistributionResource(_) => false,
+                PythonResource::EggFile(_) => false,
+                PythonResource::PathExtension(_) => false,
+                PythonResource::File(_) => false,
+            })
+        {
             let mut add_context = self
                 .packaging_policy
                 .derive_add_collection_context(&resource);
 
             if let Some(callback) = &callback {
-                callback(&self.packaging_policy, &resource, &mut add_context)?;
+                callback(&self.packaging_policy, resource, &mut add_context)?;
             }
 
-            self.add_python_module_source(&source, Some(add_context))?;
-        }
-
-        for data in self.target_distribution.resource_datas()? {
-            let resource = (&data).into();
-            let mut add_context = self
-                .packaging_policy
-                .derive_add_collection_context(&resource);
-
-            if let Some(callback) = &callback {
-                callback(&self.packaging_policy, &resource, &mut add_context)?;
+            match resource {
+                PythonResource::ModuleSource(source) => {
+                    self.add_python_module_source(source, Some(add_context))?;
+                }
+                PythonResource::PackageResource(r) => {
+                    self.add_python_package_resource(r, Some(add_context))?;
+                }
+                _ => panic!("should not get here since resources should be filtered above"),
             }
-
-            self.add_python_package_resource(&data, Some(add_context))?;
         }
 
         Ok(())
@@ -589,6 +650,20 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         Ok(())
     }
 
+    fn add_file_data(
+        &mut self,
+        file: &FileData,
+        add_context: Option<PythonResourceAddCollectionContext>,
+    ) -> Result<()> {
+        let add_context = add_context.unwrap_or_else(|| {
+            self.packaging_policy
+                .derive_add_collection_context(&file.into())
+        });
+
+        self.resources_collector
+            .add_file_data_with_context(file, &add_context)
+    }
+
     fn filter_resources_from_files(
         &mut self,
         logger: &slog::Logger,
@@ -666,7 +741,7 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         }
 
         let mut resources = Vec::new();
-        compiled_resources.write_packed_resources_v1(&mut resources)?;
+        compiled_resources.write_packed_resources(&mut resources)?;
 
         let linking_info = self.resolve_python_linking_info(logger, opt_level)?;
 
@@ -679,6 +754,20 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
                 };
 
                 extra_files.add_file(&manifest_path, &content)?;
+            }
+        }
+
+        if let Some(tcl_files_path) = self.tcl_files_path() {
+            for (path, location) in self.target_distribution.tcl_files()? {
+                let install_path = PathBuf::from(tcl_files_path).join(path);
+
+                extra_files.add_file(
+                    &install_path,
+                    &FileContent {
+                        data: location.resolve()?,
+                        executable: false,
+                    },
+                )?;
             }
         }
 
@@ -702,14 +791,14 @@ pub mod tests {
         crate::python_distributions::PYTHON_DISTRIBUTIONS,
         crate::testutil::*,
         lazy_static::lazy_static,
-        python_packaging::{
-            location::ConcreteResourceLocation, policy::ExtensionModuleFilter,
-            resource::LibraryDependency,
-        },
+        python_packaging::{location::ConcreteResourceLocation, policy::ExtensionModuleFilter},
         std::collections::BTreeSet,
         std::iter::FromIterator,
         std::ops::DerefMut,
     };
+
+    #[cfg(target_os = "linux")]
+    use python_packaging::resource::LibraryDependency;
 
     lazy_static! {
         pub static ref WINDOWS_TARGET_TRIPLES: Vec<&'static str> =
@@ -814,13 +903,13 @@ pub mod tests {
                 .compatible_host_triples()
                 .contains(&self.host_triple)
             {
-                Arc::new(target_distribution.clone_box())
+                target_distribution.clone_trait()
             } else {
                 let host_record = PYTHON_DISTRIBUTIONS
                     .find_distribution(&self.host_triple, &DistributionFlavor::Standalone, None)
                     .ok_or_else(|| anyhow!("could not find host Python distribution"))?;
 
-                Arc::new(get_distribution(&host_record.location)?.clone_box())
+                get_distribution(&host_record.location)?.clone_trait()
             };
 
             let mut policy = target_distribution.create_packaging_policy()?;

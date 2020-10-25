@@ -7,8 +7,7 @@
 use {
     python3_sys as pyffi,
     python_packaging::interpreter::{
-        PythonInterpreterConfig, PythonInterpreterProfile, PythonRawAllocator, PythonRunMode,
-        TerminfoResolution,
+        PythonInterpreterConfig, PythonInterpreterProfile, PythonRawAllocator, TerminfoResolution,
     },
     std::{
         ffi::{CString, OsString},
@@ -57,6 +56,9 @@ pub struct ExtensionModule {
 /// hold higher-level configuration for features specific to this crate.
 #[derive(Clone, Debug)]
 pub struct OxidizedPythonInterpreterConfig<'a> {
+    /// The path of the currently executing executable.
+    pub exe: Option<PathBuf>,
+
     /// The filesystem path from which relative paths will be interpreted.
     pub origin: Option<PathBuf>,
 
@@ -66,14 +68,13 @@ pub struct OxidizedPythonInterpreterConfig<'a> {
     /// Allocator to use for Python's raw allocator.
     pub raw_allocator: Option<PythonRawAllocator>,
 
-    /// Whether to automatically set missing "path configuration" fields in isolated mode.
+    /// Whether to automatically set missing "path configuration" fields.
     ///
-    /// If `.interpreter_config.profile == PythonInterpreterProfile::Isolated` and this
-    /// is `true`, various path configuration
+    /// If `true`, various path configuration
     /// (https://docs.python.org/3/c-api/init_config.html#path-configuration) fields
-    /// will be set automatically if their corresponding `.interpreter_config` fields are
-    /// `None`. For example, `program_name` will be set to the current executable
-    /// and `home` will be set to the executable's directory.
+    /// will be set automatically if their corresponding `.interpreter_config`
+    /// fields are `None`. For example, `program_name` will be set to the current
+    /// executable and `home` will be set to the executable's directory.
     ///
     /// If this is `false`, the default path configuration built into libpython
     /// is used.
@@ -85,7 +86,15 @@ pub struct OxidizedPythonInterpreterConfig<'a> {
     /// files are present, define `packed_resources`, and/or set
     /// `.interpreter_config.module_search_paths` to ensure the interpreter can find
     /// the Python standard library, otherwise the interpreter will fail to start.
-    pub isolated_auto_set_path_configuration: bool,
+    ///
+    /// Without this set or corresponding `.interpreter_config` fields set, you
+    /// may also get run-time errors like
+    /// `Could not find platform independent libraries <prefix>` or
+    /// `Consider setting $PYTHONHOME to <prefix>[:<exec_prefix>]`. If you see
+    /// these errors, it means the automatic path config resolutions built into
+    /// libpython didn't work because the run-time layout didn't match the
+    /// build-time configuration.
+    pub set_missing_path_configuration: bool,
 
     /// Whether to install our custom meta path importer on interpreter init.
     pub oxidized_importer: bool,
@@ -101,7 +110,7 @@ pub struct OxidizedPythonInterpreterConfig<'a> {
     /// The format of the data is defined by the ``python-packed-resources``
     /// crate. The data will be parsed as part of initializing the custom
     /// meta path importer during interpreter initialization.
-    pub packed_resources: Option<&'a [u8]>,
+    pub packed_resources: Vec<&'a [u8]>,
 
     /// Extra extension modules to make available to the interpreter.
     ///
@@ -140,6 +149,15 @@ pub struct OxidizedPythonInterpreterConfig<'a> {
     /// How to resolve the `terminfo` database.
     pub terminfo_resolution: TerminfoResolution,
 
+    /// Path to use to define the `TCL_LIBRARY` environment variable.
+    ///
+    /// This directory should contain an `init.tcl` file. It is commonly
+    /// a directory named `tclX.Y`. e.g. `tcl8.6`.
+    ///
+    /// `$ORIGIN` in the path is expanded to the directory of the current
+    /// executable.
+    pub tcl_library: Option<PathBuf>,
+
     /// Environment variable holding the directory to write a loaded modules file.
     ///
     /// If this value is set and the environment it refers to is set,
@@ -147,42 +165,46 @@ pub struct OxidizedPythonInterpreterConfig<'a> {
     /// the directory specified containing a ``\n`` delimited list of modules
     /// loaded in ``sys.modules``.
     pub write_modules_directory_env: Option<String>,
-
-    /// Defines what code to run by default.
-    ///
-    pub run: PythonRunMode,
 }
 
 impl<'a> Default for OxidizedPythonInterpreterConfig<'a> {
     fn default() -> Self {
         Self {
+            exe: None,
             origin: None,
             interpreter_config: PythonInterpreterConfig {
                 profile: PythonInterpreterProfile::Python,
                 ..PythonInterpreterConfig::default()
             },
             raw_allocator: None,
-            isolated_auto_set_path_configuration: true,
+            set_missing_path_configuration: true,
             oxidized_importer: false,
             filesystem_importer: true,
-            packed_resources: None,
+            packed_resources: vec![],
             extra_extension_modules: None,
             argv: None,
             argvb: false,
             sys_frozen: false,
             sys_meipass: false,
             terminfo_resolution: TerminfoResolution::Dynamic,
+            tcl_library: None,
             write_modules_directory_env: None,
-            run: PythonRunMode::Repl,
         }
     }
 }
 
 impl<'a> OxidizedPythonInterpreterConfig<'a> {
     pub fn ensure_origin(&mut self) -> Result<&Path, &'static str> {
+        if self.exe.is_none() {
+            self.exe =
+                Some(std::env::current_exe().map_err(|_| "could not obtain current executable")?);
+        }
+
         if self.origin.is_none() {
-            let exe = std::env::current_exe().map_err(|_| "could not obtain current executable")?;
-            let origin = exe
+            let origin = self
+                .exe
+                .as_ref()
+                .unwrap()
                 .parent()
                 .ok_or_else(|| "unable to obtain current executable parent directory")?;
 
@@ -236,6 +258,25 @@ impl<'a> OxidizedPythonInterpreterConfig<'a> {
             args.clone()
         } else {
             std::env::args_os().collect::<Vec<_>>()
+        }
+    }
+
+    /// Resolves the value to use for `TCL_LIBRARY`.
+    pub fn resolve_tcl_library(&mut self) -> Result<Option<OsString>, &'static str> {
+        let origin = self.ensure_origin()?;
+        let origin_string = origin.display().to_string();
+
+        if let Some(tcl_library) = &self.tcl_library {
+            let tcl_library = PathBuf::from(
+                tcl_library
+                    .display()
+                    .to_string()
+                    .replace("$ORIGIN", &origin_string),
+            );
+
+            Ok(Some(tcl_library.into_os_string()))
+        } else {
+            Ok(None)
         }
     }
 }

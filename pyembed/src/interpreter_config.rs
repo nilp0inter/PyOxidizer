@@ -9,9 +9,7 @@ use {
     libc::{c_int, size_t, wchar_t},
     python3_sys as pyffi,
     python_packaging::{
-        interpreter::{
-            CheckHashPYCsMode, PythonInterpreterConfig, PythonInterpreterProfile, PythonRunMode,
-        },
+        interpreter::{CheckHashPYCsMode, PythonInterpreterConfig, PythonInterpreterProfile},
         resource::BytecodeOptimizationLevel,
     },
     std::convert::TryInto,
@@ -238,20 +236,9 @@ fn set_legacy_windows_stdio(config: &mut pyffi::PyConfig, value: bool) {
 impl<'a> OxidizedPythonInterpreterConfig<'a> {
     /// Whether the run configuration should execute via Py_RunMain().
     pub(crate) fn uses_py_runmain(&self) -> bool {
-        if self.interpreter_config.run_command.is_some()
+        self.interpreter_config.run_command.is_some()
             || self.interpreter_config.run_filename.is_some()
             || self.interpreter_config.run_module.is_some()
-        {
-            true
-        } else {
-            match &self.run {
-                PythonRunMode::Eval { .. } => true,
-                PythonRunMode::File { .. } => true,
-                PythonRunMode::Module { .. } => true,
-                PythonRunMode::Repl => true,
-                PythonRunMode::None => false,
-            }
-        }
     }
 }
 
@@ -587,25 +574,16 @@ impl<'a> TryInto<pyffi::PyConfig> for &'a OxidizedPythonInterpreterConfig<'a> {
         let config: pyffi::PyConfig =
             python_interpreter_config_to_py_config(&self.interpreter_config)?;
 
-        // We define a configuration "profile" to dictate overall interpreter
-        // behavior. In "python" mode, we behave like a `python` executable.
-        // In "isolated" mode, we behave like an embedded application.
-        //
-        // In "python" mode, we don't set any config fields unless they were
-        // explicitly defined in the `PythonInterpreterConfig`.
-        //
-        // In "isolated" mode, we automatically fill in various fields as
-        // derived from the environment if allowed to do so. But we never
-        // overwrite values that are explicitly set in the config.
-        if self.interpreter_config.profile == PythonInterpreterProfile::Isolated
-            && self.isolated_auto_set_path_configuration
-        {
-            let exe = std::env::current_exe()
-                .map_err(|err| format!("unable to obtain current executable: {}", err))?;
-            let origin = exe
-                .parent()
-                .ok_or_else(|| "unable to get current executable directory".to_string())?;
+        if self.exe.is_none() {
+            return Err("current executable not set; must call ensure_origin() 1st".to_string());
+        }
+        if self.origin.is_none() {
+            return Err("origin not set; must call ensure_origin() 1st".to_string());
+        }
+        let exe = self.exe.as_ref().unwrap();
+        let origin = self.origin.as_ref().unwrap();
 
+        if self.set_missing_path_configuration {
             // program_name set to path of current executable.
             if self.interpreter_config.program_name.is_none() {
                 set_config_string_from_path(
@@ -619,41 +597,6 @@ impl<'a> TryInto<pyffi::PyConfig> for &'a OxidizedPythonInterpreterConfig<'a> {
             // PYTHONHOME is set to directory of current executable.
             if self.interpreter_config.home.is_none() {
                 set_config_string_from_path(&config, &config.home, origin, "setting home")?;
-            }
-        }
-
-        match &self.run {
-            PythonRunMode::None => {}
-            PythonRunMode::Repl => {}
-            PythonRunMode::Eval { code } => {
-                if self.interpreter_config.run_command.is_none() {
-                    set_config_string_from_str(
-                        &config,
-                        &config.run_command,
-                        code,
-                        "setting run_command",
-                    )?;
-                }
-            }
-            PythonRunMode::File { path } => {
-                if self.interpreter_config.run_filename.is_none() {
-                    set_config_string_from_path(
-                        &config,
-                        &config.run_filename,
-                        path,
-                        "setting run_filename",
-                    )?;
-                }
-            }
-            PythonRunMode::Module { module } => {
-                if self.interpreter_config.run_module.is_none() {
-                    set_config_string_from_str(
-                        &config,
-                        &config.run_module,
-                        module,
-                        "setting run_module",
-                    )?;
-                }
             }
         }
 

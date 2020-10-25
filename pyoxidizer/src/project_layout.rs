@@ -4,21 +4,33 @@
 
 //! Handle file layout of PyOxidizer projects.
 
-use anyhow::{anyhow, Result};
-use handlebars::Handlebars;
-use lazy_static::lazy_static;
-use python_packaging::filesystem_scanning::walk_tree_files;
-use serde::Serialize;
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
-use crate::environment::{PyOxidizerSource, BUILD_GIT_COMMIT, PYOXIDIZER_VERSION};
+use {
+    crate::environment::{PyOxidizerSource, BUILD_GIT_COMMIT, PYOXIDIZER_VERSION},
+    anyhow::{anyhow, Result},
+    handlebars::Handlebars,
+    lazy_static::lazy_static,
+    python_packaging::filesystem_scanning::walk_tree_files,
+    serde::Serialize,
+    std::{
+        collections::BTreeMap,
+        io::Write,
+        path::{Path, PathBuf},
+    },
+};
 
 lazy_static! {
     static ref HANDLEBARS: Handlebars<'static> = {
         let mut handlebars = Handlebars::new();
 
+        handlebars
+            .register_template_string(
+                "application-manifest.rc",
+                include_str!("templates/application-manifest.rc"),
+            )
+            .unwrap();
+        handlebars
+            .register_template_string("exe.manifest", include_str!("templates/exe.manifest"))
+            .unwrap();
         handlebars
             .register_template_string("new-build.rs", include_str!("templates/new-build.rs"))
             .unwrap();
@@ -138,8 +150,9 @@ pub fn write_new_cargo_config(project_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn write_new_build_rs(path: &Path) -> Result<()> {
-    let data: BTreeMap<String, String> = BTreeMap::new();
+pub fn write_new_build_rs(path: &Path, program_name: &str) -> Result<()> {
+    let mut data = TemplateData::new();
+    data.program_name = Some(program_name.to_string());
     let t = HANDLEBARS.render("new-build.rs", &data)?;
 
     println!("writing {}", path.display());
@@ -149,8 +162,14 @@ pub fn write_new_build_rs(path: &Path) -> Result<()> {
 }
 
 /// Write a new main.rs file that runs the embedded Python interpreter.
-pub fn write_new_main_rs(path: &Path) -> Result<()> {
-    let data: BTreeMap<String, String> = BTreeMap::new();
+///
+/// `windows_subsystem` is the value of the `windows_subsystem` Rust attribute.
+pub fn write_new_main_rs(path: &Path, windows_subsystem: &str) -> Result<()> {
+    let mut data: BTreeMap<String, String> = BTreeMap::new();
+    data.insert(
+        "windows_subsystem".to_string(),
+        windows_subsystem.to_string(),
+    );
     let t = HANDLEBARS.render("new-main.rs", &data)?;
 
     println!("writing {}", path.to_str().unwrap());
@@ -186,6 +205,33 @@ pub fn write_new_pyoxidizer_config_file(
     println!("writing {}", path.to_str().unwrap());
     let mut fh = std::fs::File::create(path)?;
     fh.write_all(t.as_bytes())?;
+
+    Ok(())
+}
+
+/// Write an application manifest and corresponding resource file.
+///
+/// This is used on Windows to allow the built executable to use long paths.
+///
+/// Windows 10 version 1607 and above enable long paths by default. So we
+/// might be able to remove this someday. It isn't clear if you get long
+/// paths support if using that version of the Windows SDK or if you have
+/// to be running on a modern Windows version as well.
+pub fn write_application_manifest(project_dir: &Path, program_name: &str) -> Result<()> {
+    let mut data = TemplateData::new();
+    data.program_name = Some(program_name.to_string());
+
+    let manifest_path = project_dir.join(format!("{}.exe.manifest", program_name));
+    let manifest_data = HANDLEBARS.render("exe.manifest", &data)?;
+    println!("writing {}", manifest_path.display());
+    let mut fh = std::fs::File::create(&manifest_path)?;
+    fh.write_all(manifest_data.as_bytes())?;
+
+    let rc_path = project_dir.join(format!("{}-manifest.rc", program_name));
+    let rc_data = HANDLEBARS.render("application-manifest.rc", &data)?;
+    println!("writing {}", rc_path.display());
+    let mut fh = std::fs::File::create(&rc_path)?;
+    fh.write_all(rc_data.as_bytes())?;
 
     Ok(())
 }
@@ -282,6 +328,10 @@ pub fn update_new_cargo_toml(path: &Path, pyembed_location: &PyembedLocation) ->
     ));
 
     content.push_str("\n");
+    content.push_str("[build-dependencies]\n");
+    content.push_str("embed-resource = \"1.3\"\n");
+
+    content.push_str("\n");
     content.push_str("[features]\n");
     content.push_str("default = [\"build-mode-pyoxidizer-exe\"]\n");
     content.push_str("jemalloc = [\"jemallocator-global\", \"pyembed/jemalloc\"]\n");
@@ -302,11 +352,15 @@ pub fn update_new_cargo_toml(path: &Path, pyembed_location: &PyembedLocation) ->
 ///
 /// The created binary application will have the name of the final
 /// path component.
+///
+/// `windows_subsystem` is the value of the `windows_subsystem` compiler
+/// attribute.
 pub fn initialize_project(
     project_path: &Path,
     pyembed_location: &PyembedLocation,
     code: Option<&str>,
     pip_install: &[&str],
+    windows_subsystem: &str,
 ) -> Result<()> {
     let status = std::process::Command::new("cargo")
         .arg("init")
@@ -323,9 +377,10 @@ pub fn initialize_project(
     add_pyoxidizer(&path, true)?;
     update_new_cargo_toml(&path.join("Cargo.toml"), pyembed_location)?;
     write_new_cargo_config(&path)?;
-    write_new_build_rs(&path.join("build.rs"))?;
-    write_new_main_rs(&path.join("src").join("main.rs"))?;
+    write_new_build_rs(&path.join("build.rs"), name)?;
+    write_new_main_rs(&path.join("src").join("main.rs"), windows_subsystem)?;
     write_new_pyoxidizer_config_file(&path, &name, code, pip_install)?;
+    write_application_manifest(&path, &name)?;
 
     Ok(())
 }

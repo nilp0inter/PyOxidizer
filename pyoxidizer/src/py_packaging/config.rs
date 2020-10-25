@@ -12,7 +12,7 @@ use {
     python_packaging::{
         interpreter::{
             Allocator, BytesWarning, CheckHashPYCsMode, CoerceCLocale, MemoryAllocatorBackend,
-            PythonInterpreterConfig, PythonInterpreterProfile, PythonRunMode, TerminfoResolution,
+            PythonInterpreterConfig, PythonInterpreterProfile, TerminfoResolution,
         },
         resource::BytecodeOptimizationLevel,
     },
@@ -51,7 +51,9 @@ fn optional_string_to_string(value: &Option<String>) -> String {
 
 fn optional_pathbuf_to_string(value: &Option<PathBuf>) -> String {
     match value {
-        Some(value) => format_args!("Some(PathBuf::from(\"{}\"", value.display()).to_string(),
+        Some(value) => {
+            format_args!("Some(std::path::PathBuf::from(r\"{}\"))", value.display()).to_string()
+        }
         None => "None".to_string(),
     }
 }
@@ -86,8 +88,8 @@ pub struct EmbeddedPythonConfig {
     pub sys_frozen: bool,
     pub sys_meipass: bool,
     pub terminfo_resolution: TerminfoResolution,
+    pub tcl_library: Option<PathBuf>,
     pub write_modules_directory_env: Option<String>,
-    pub run_mode: PythonRunMode,
 }
 
 impl Default for EmbeddedPythonConfig {
@@ -110,8 +112,8 @@ impl Default for EmbeddedPythonConfig {
             sys_frozen: false,
             sys_meipass: false,
             terminfo_resolution: TerminfoResolution::None,
+            tcl_library: None,
             write_modules_directory_env: None,
-            run_mode: PythonRunMode::Repl,
         }
     }
 }
@@ -124,6 +126,7 @@ impl EmbeddedPythonConfig {
     ) -> Result<String> {
         let code = format!(
             "pyembed::OxidizedPythonInterpreterConfig {{\n    \
+            exe: None,\n    \
             origin: None,\n    \
             interpreter_config: pyembed::PythonInterpreterConfig {{\n        \
             profile: {},\n        \
@@ -185,7 +188,7 @@ impl EmbeddedPythonConfig {
             x_options: {},\n        \
             }},\n    \
             raw_allocator: Some({}),\n    \
-            isolated_auto_set_path_configuration: true,\n    \
+            set_missing_path_configuration: true,\n    \
             oxidized_importer: {},\n    \
             filesystem_importer: {},\n    \
             packed_resources: {},\n    \
@@ -195,8 +198,8 @@ impl EmbeddedPythonConfig {
             sys_frozen: {},\n    \
             sys_meipass: {},\n    \
             terminfo_resolution: {},\n    \
+            tcl_library: {},\n    \
             write_modules_directory_env: {},\n    \
-            run: {},\n\
             }}\n\
             ",
             match self.config.profile {
@@ -263,10 +266,13 @@ impl EmbeddedPythonConfig {
             match &self.config.module_search_paths {
                 Some(paths) => {
                     format!(
-                        "Some({})",
+                        "Some(vec![{}])",
                         paths
                             .iter()
-                            .map(|p| format_args!("\"{}\"", p.display()).to_string())
+                            .map(
+                                |p| format_args!("std::path::PathBuf::from(\"{}\")", p.display())
+                                    .to_string()
+                            )
                             .collect::<Vec<String>>()
                             .join(", ")
                     )
@@ -312,9 +318,9 @@ impl EmbeddedPythonConfig {
             self.oxidized_importer,
             self.filesystem_importer,
             if let Some(path) = packed_resources_path {
-                format!("Some(include_bytes!(r#\"{}\"#))", path.display())
+                format!("vec![include_bytes!(r#\"{}\"#)]", path.display())
             } else {
-                "None".to_string()
+                "vec![]".to_string()
             },
             self.argvb,
             self.sys_frozen,
@@ -326,25 +332,8 @@ impl EmbeddedPythonConfig {
                     format!("pyembed::TerminfoResolution::Static(r###\"{}\"###", v)
                 }
             },
+            optional_pathbuf_to_string(&self.tcl_library),
             optional_string_to_string(&self.write_modules_directory_env),
-            match self.run_mode {
-                PythonRunMode::None => "pyembed::PythonRunMode::None".to_owned(),
-                PythonRunMode::Repl => "pyembed::PythonRunMode::Repl".to_owned(),
-                PythonRunMode::Module { ref module } => {
-                    "pyembed::PythonRunMode::Module { module: \"".to_owned()
-                        + module
-                        + "\".to_string() }"
-                }
-                PythonRunMode::Eval { ref code } => {
-                    "pyembed::PythonRunMode::Eval { code: r###\"".to_owned()
-                        + code
-                        + "\"###.to_string() }"
-                }
-                PythonRunMode::File { ref path } => {
-                    format!("pyembed::PythonRunMode::File {{ path: std::path::PathBuf::new(r###\"{}\"###) }}",
-                    path.display())
-                }
-            },
         );
 
         Ok(code)
@@ -373,6 +362,24 @@ impl EmbeddedPythonConfig {
              pub fn default_python_config<'a>() -> pyembed::OxidizedPythonInterpreterConfig<'a> {{\n{}\n}}\n",
             indented
         ))?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serialize_module_search_paths() -> Result<()> {
+        let mut config = EmbeddedPythonConfig::default();
+        config.config.module_search_paths =
+            Some(vec![PathBuf::from("$ORIGIN/lib"), PathBuf::from("lib")]);
+
+        let code = config.to_oxidized_python_interpreter_config_rs(None)?;
+
+        assert!(code.contains("module_search_paths: Some(vec![std::path::PathBuf::from(\"$ORIGIN/lib\"), std::path::PathBuf::from(\"lib\")]),"));
 
         Ok(())
     }

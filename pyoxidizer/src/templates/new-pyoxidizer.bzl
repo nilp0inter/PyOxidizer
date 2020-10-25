@@ -18,6 +18,21 @@ def make_exe(dist):
     # to attributes and calling functions.
     policy = dist.make_python_packaging_policy()
 
+    # Enable support for non-classified "file" resources to be added to
+    # resource collections.
+    # policy.allow_files = True
+
+    # Control support for loading Python extensions and other shared libraries
+    # from memory. This is only supported on Windows and is ignored on other
+    # platforms.
+    # policy.allow_in_memory_shared_library_loading = True
+
+    # Control whether to generate Python bytecode at various optimization
+    # levels. The default optimization level used by Python is 0.
+    # policy.bytecode_optimize_level_zero = True
+    # policy.bytecode_optimize_level_one = True
+    # policy.bytecode_optimize_level_two = True
+
     # Package all available Python extensions in the distribution.
     # policy.extension_module_filter = "all"
 
@@ -36,6 +51,17 @@ def make_exe(dist):
     # GPL licensed software.
     # policy.extension_module_filter = "no-gpl"
 
+    # Controls whether the file scanner attempts to classify files and emit
+    # resource-specific values.
+    # policy.file_scanner_classify_files = True
+
+    # Controls whether `File` instances are emitted by the file scanner.
+    # policy.file_scanner_emit_files = False
+
+    # Controls the `add_include` attribute of "classified" resources
+    # (`PythonModuleSource`, `PythonPackageResource`, etc).
+    # policy.include_classified_resources = True
+
     # Toggle whether Python module source code for modules in the Python
     # distribution's standard library are included.
     # policy.include_distribution_sources = False
@@ -43,6 +69,13 @@ def make_exe(dist):
     # Toggle whether Python package resource files for the Python standard
     # library are included.
     # policy.include_distribution_resources = False
+
+    # Controls the `add_include` attribute of `File` resources.
+    # policy.include_file_resources = False
+
+    # Controls the `add_include` attribute of `PythonModuleSource` not in
+    # the standard library.
+    # policy.include_non_distribution_sources = True
 
     # Toggle whether files associated with tests are included.
     # policy.include_test = False
@@ -69,6 +102,14 @@ def make_exe(dist):
     # Define a preferred Python extension module variant in the Python distribution
     # to use.
     # policy.set_preferred_extension_module_variant("foo", "bar")
+
+    # Configure policy values to classify files as typed resources.
+    # (This is the default.)
+    # policy.set_resource_handling_mode("classify")
+
+    # Configure policy values to handle files as files and not attempt
+    # to classify files as specific types.
+    # policy.set_resource_handling_mode("files")
 
     # This variable defines the configuration of the embedded Python
     # interpreter. By default, the interpreter will run a Python REPL
@@ -111,17 +152,14 @@ def make_exe(dist):
     # by the given environment variable.
     # python_config.write_modules_directory_env = "/tmp/oxidized/loaded_modules"
 
-    # Don't run any Python code when the interpreter starts.
-    # python_config.run_mode = 'none'
-
-    # Start a Python REPL when the interpreter starts.
-    # python_config.run_mode = 'repl'
-
     # Evaluate a string as Python code when the interpreter starts.
-    # python_config.run_mode = 'eval:<code>'
+    # python_config.run_command = "<code>"
 
     # Run a Python module as __main__ when the interpreter starts.
-    # python_config.run_mode = 'module:foo.bar'
+    # python_config.run_module = "<module>"
+
+    # Run a Python file when the interpreter starts.
+    # python_config.run_filename = "/path/to/file"
 
     # Produce a PythonExecutable from a Python distribution, embedded
     # resources, and other options. The returned object represents the
@@ -136,6 +174,16 @@ def make_exe(dist):
         # If no argument passed, the default `PythonInterpreterConfig` is used.
         config=python_config,
     )
+
+    # Install tcl/tk support files to a specified directory so the `tkinter` Python
+    # module works.
+    # exe.tcl_files_path = "lib"
+
+    # Make the executable a console application on Windows.
+    # exe.windows_subsystem = "console"
+
+    # Make the executable a non-console application on Windows.
+    # exe.windows_subsystem = "windows"
 
     # Invoke `pip download` to install a single package using wheel archives
     # obtained via `pip download`. `pip_download()` returns objects representing

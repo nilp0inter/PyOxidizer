@@ -19,7 +19,7 @@ use {
         bytecode::PythonBytecodeCompiler,
         module_util::PythonModuleSuffixes,
         policy::PythonPackagingPolicy,
-        resource::{PythonExtensionModule, PythonModuleSource, PythonPackageResource},
+        resource::{DataLocation, PythonResource},
     },
     sha2::{Digest, Sha256},
     slog::warn,
@@ -31,39 +31,11 @@ use {
         io::Read,
         ops::DerefMut,
         path::{Path, PathBuf},
-        sync::Arc,
+        sync::{Arc, Mutex},
     },
     url::Url,
     uuid::Uuid,
 };
-
-// TODO denote test packages in Python distribution.
-const STDLIB_TEST_PACKAGES: &[&str] = &[
-    "bsddb.test",
-    "ctypes.test",
-    "distutils.tests",
-    "email.test",
-    "idlelib.idle_test",
-    "json.tests",
-    "lib-tk.test",
-    "lib2to3.tests",
-    "sqlite3.test",
-    "test",
-    "tkinter.test",
-    "unittest.test",
-];
-
-pub fn is_stdlib_test_package(name: &str) -> bool {
-    for package in STDLIB_TEST_PACKAGES {
-        let prefix = format!("{}.", package);
-
-        if &name == package || name.starts_with(&prefix) {
-            return true;
-        }
-    }
-
-    false
-}
 
 /// Denotes how a binary should link libpython.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,7 +73,7 @@ pub struct PythonDistributionRecord {
 /// Describes a generic Python distribution.
 pub trait PythonDistribution {
     /// Clone self into a Box'ed trait object.
-    fn clone_box(&self) -> Box<dyn PythonDistribution>;
+    fn clone_trait(&self) -> Arc<dyn PythonDistribution>;
 
     /// The Rust machine triple this distribution runs on.
     fn target_triple(&self) -> &str;
@@ -151,6 +123,9 @@ pub trait PythonDistribution {
     /// Obtain file suffixes for various Python module flavors.
     fn python_module_suffixes(&self) -> Result<PythonModuleSuffixes>;
 
+    /// Obtain Python packages in the standard library that provide tests.
+    fn stdlib_test_packages(&self) -> Vec<String>;
+
     /// Create a `PythonBytecodeCompiler` from this instance.
     fn create_bytecode_compiler(&self) -> Result<Box<dyn PythonBytecodeCompiler>>;
 
@@ -176,21 +151,11 @@ pub trait PythonDistribution {
         libpython_link_mode: BinaryLibpythonLinkMode,
         policy: &PythonPackagingPolicy,
         config: &EmbeddedPythonConfig,
-        host_distribution: Option<Arc<Box<dyn PythonDistribution>>>,
+        host_distribution: Option<Arc<dyn PythonDistribution>>,
     ) -> Result<Box<dyn PythonBinaryBuilder>>;
 
-    /// Obtain `PythonExtensionModule` instances present in this distribution.
-    ///
-    /// Multiple variants of the same extension module may be returned.
-    fn iter_extension_modules<'a>(
-        &'a self,
-    ) -> Box<dyn Iterator<Item = &'a PythonExtensionModule> + 'a>;
-
-    /// Obtain `SourceModule` instances present in this distribution.
-    fn source_modules(&self) -> Result<Vec<PythonModuleSource>>;
-
-    /// Obtain `ResourceData` instances present in this distribution.
-    fn resource_datas(&self) -> Result<Vec<PythonPackageResource>>;
+    /// Obtain `PythonResource` instances for every resource in this distribution.
+    fn python_resources<'a>(&self) -> Vec<PythonResource<'a>>;
 
     /// Ensure pip is available to run in the distribution.
     ///
@@ -220,6 +185,30 @@ pub trait PythonDistribution {
     /// This effectively answers whether we can embed a shared library into an
     /// executable and load it without having to materialize it on a filesystem.
     fn supports_in_memory_shared_library_loading(&self) -> bool;
+
+    /// Determine whether a named module is in a known standard library test package.
+    fn is_stdlib_test_package(&self, name: &str) -> bool {
+        for package in self.stdlib_test_packages() {
+            let prefix = format!("{}.", package);
+
+            if name == package || name.starts_with(&prefix) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Obtain support files for tcl/tk.
+    ///
+    /// The returned list of files contains relative file names and the locations
+    /// of file content. If the files are installed in a new directory, it should
+    /// be possible to use that directory joined with `tcl_library_path_directory`
+    /// as the value of `TCL_LIBRARY`.
+    fn tcl_files(&self) -> Result<Vec<(PathBuf, DataLocation)>>;
+
+    /// The name of the directory to use for `TCL_LIBRARY`
+    fn tcl_library_path_directory(&self) -> Option<String>;
 }
 
 /// Multiple threads or processes could race to extract the archive.
@@ -474,30 +463,31 @@ impl TryFrom<&str> for DistributionFlavor {
     }
 }
 
+type DistributionCacheKey = (PathBuf, PythonDistributionLocation);
+type DistributionCacheValue = Arc<Mutex<Option<Arc<StandaloneDistribution>>>>;
+
 /// Holds references to resolved PythonDistribution instances.
 #[derive(Debug)]
 pub struct DistributionCache {
-    cache: std::sync::Mutex<
-        HashMap<(PathBuf, PythonDistributionLocation), Arc<Box<StandaloneDistribution>>>,
-    >,
+    cache: Mutex<HashMap<DistributionCacheKey, DistributionCacheValue>>,
     default_dest_dir: Option<PathBuf>,
 }
 
 impl DistributionCache {
     pub fn new(default_dest_dir: Option<&Path>) -> Self {
         Self {
-            cache: std::sync::Mutex::new(HashMap::new()),
+            cache: Mutex::new(HashMap::new()),
             default_dest_dir: default_dest_dir.clone().map(|x| x.to_path_buf()),
         }
     }
 
     /// Resolve a `PythonDistribution` given its source and storage locations.
     pub fn resolve_distribution(
-        &mut self,
+        &self,
         logger: &slog::Logger,
         location: &PythonDistributionLocation,
         dest_dir: Option<&Path>,
-    ) -> Result<Arc<Box<StandaloneDistribution>>> {
+    ) -> Result<Arc<StandaloneDistribution>> {
         let dest_dir = if let Some(p) = dest_dir {
             p
         } else if let Some(p) = &self.default_dest_dir {
@@ -508,33 +498,78 @@ impl DistributionCache {
 
         let key = (dest_dir.to_path_buf(), location.clone());
 
-        {
-            let lock = self
+        // This logic is whack. Surely there's a cleaner way to do this...
+        //
+        // The general problem is instances of this type are Send + Sync. And
+        // we do rely on multiple threads simultaneously accessing it. This
+        // occurs in tests for example, which use a global/static instance to
+        // cache resolved distributions to drastically reduce CPU overhead.
+        //
+        // We need a Mutex of some kind around the HashMap to allow
+        // multi-threaded access. But if that was the only Mutex that existed, we'd
+        // need to hold the Mutex while any thread was resolving a distribution
+        // and this would prevent multi-threaded distribution resolving.
+        //
+        // Or we could release that Mutex after a missing lookup and then each
+        // thread would race to resolve the distribution and insert. That's fine,
+        // but it results in redundancy and wasted CPU (several minutes worth for
+        // debug builds in the test harness).
+        //
+        // What we do instead is have HashMap values be Arc<Mutex<Option<T>>>.
+        // We then perform a 2 phase lookup.
+        //
+        // In the 1st lock, we lock the entire HashMap and do the key lookup.
+        // If it exists, we clone the Arc<T>. Else if it is missing, we insert
+        // a new key with `None` and return a clone of its Arc<T>. Either way,
+        // we have a handle on the Arc<Mutex<Option<T>>> in a populated. We then
+        // release the outer HashMap lock.
+        //
+        // We then lock the inner entry. With that lock hold, we return a clone
+        // of its `Some(T)` entry immediately or proceed to populate it. Only 1
+        // thread can hold this lock, ensuring only 1 thread performs the
+        // value resolution. Multiple threads can resolve different keys in
+        // parallel. By other threads will be blocked resolving a single key.
+
+        let entry = {
+            let mut lock = self
                 .cache
                 .lock()
                 .map_err(|e| anyhow!("cannot obtain distribution cache lock: {}", e))?;
-            if let Some(dist) = lock.get(&key) {
-                return Ok(dist.clone());
+
+            if let Some(value) = lock.get(&key) {
+                value.clone()
+            } else {
+                let value = Arc::new(Mutex::new(None));
+                lock.insert(key.clone(), value.clone());
+
+                value
             }
-        }
+        };
 
-        let dist = Arc::new(Box::new(StandaloneDistribution::from_location(
-            logger, location, &dest_dir,
-        )?));
-
-        let mut lock = self
-            .cache
+        let mut lock = entry
             .lock()
             .map_err(|e| anyhow!("cannot obtain distribution lock: {}", e))?;
-        lock.deref_mut().insert(key, dist.clone());
 
-        Ok(dist)
+        let value = lock.deref_mut();
+
+        if let Some(dist) = value {
+            Ok(dist.clone())
+        } else {
+            let dist = Arc::new(StandaloneDistribution::from_location(
+                logger, location, &dest_dir,
+            )?);
+
+            lock.replace(dist.clone());
+
+            Ok(dist)
+        }
     }
 }
 
 /// Obtain a `PythonDistribution` implementation of a flavor and from a location.
 ///
 /// The distribution will be written to `dest_dir`.
+#[allow(unused)]
 pub fn resolve_distribution(
     logger: &slog::Logger,
     location: &PythonDistributionLocation,
@@ -558,44 +593,9 @@ pub fn default_distribution_location(
     Ok(dist.location)
 }
 
-/// Resolve the default Python distribution for a build target.
-///
-/// `flavor` is the high-level type of distribution.
-/// `target` is a Rust target triple the distribution should target.
-/// `dest_dir` is a directory to extract the distribution to. The distribution will
-/// be extracted to a child directory of this path.
-#[allow(unused)]
-pub fn default_distribution(
-    logger: &slog::Logger,
-    flavor: &DistributionFlavor,
-    target: &str,
-    dest_dir: &Path,
-) -> Result<Box<dyn PythonDistribution>> {
-    let location = default_distribution_location(flavor, target, None)?;
-
-    resolve_distribution(logger, &location, dest_dir)
-}
-
 #[cfg(test)]
 mod tests {
     use {super::*, crate::testutil::*};
-
-    #[test]
-    fn test_default_distribution() -> Result<()> {
-        let logger = get_logger()?;
-        let target = env!("HOST");
-
-        let temp_dir = tempdir::TempDir::new("pyoxidizer-test")?;
-
-        default_distribution(
-            &logger,
-            &DistributionFlavor::Standalone,
-            target,
-            temp_dir.path(),
-        )?;
-
-        Ok(())
-    }
 
     #[test]
     fn test_all_standalone_distributions() -> Result<()> {

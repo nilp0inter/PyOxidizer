@@ -10,7 +10,7 @@ use {
     linked_hash_map::LinkedHashMap,
     python_packaging::{
         location::ConcreteResourceLocation,
-        policy::{ExtensionModuleFilter, PythonPackagingPolicy},
+        policy::{ExtensionModuleFilter, PythonPackagingPolicy, ResourceHandlingMode},
     },
     starlark::{
         environment::TypeValues,
@@ -108,6 +108,7 @@ impl TypedValue for PythonPackagingPolicyValue {
 
     fn get_attr(&self, attribute: &str) -> ValueResult {
         let v = match attribute {
+            "allow_files" => Value::from(self.inner.allow_files()),
             "allow_in_memory_shared_library_loading" => {
                 Value::from(self.inner.allow_in_memory_shared_library_loading())
             }
@@ -117,12 +118,18 @@ impl TypedValue for PythonPackagingPolicyValue {
             "bytecode_optimize_level_one" => Value::from(self.inner.bytecode_optimize_level_one()),
             "bytecode_optimize_level_two" => Value::from(self.inner.bytecode_optimize_level_two()),
             "extension_module_filter" => Value::from(self.inner.extension_module_filter().as_ref()),
+            "file_scanner_classify_files" => Value::from(self.inner.file_scanner_classify_files()),
+            "file_scanner_emit_files" => Value::from(self.inner.file_scanner_emit_files()),
             "include_distribution_sources" => {
                 Value::from(self.inner.include_distribution_sources())
             }
             "include_distribution_resources" => {
                 Value::from(self.inner.include_distribution_resources())
             }
+            "include_classified_resources" => {
+                Value::from(self.inner.include_classified_resources())
+            }
+            "include_file_resources" => Value::from(self.inner.include_file_resources()),
             "include_non_distribution_sources" => {
                 Value::from(self.inner.include_non_distribution_sources())
             }
@@ -149,13 +156,18 @@ impl TypedValue for PythonPackagingPolicyValue {
 
     fn has_attr(&self, attribute: &str) -> Result<bool, ValueError> {
         Ok(match attribute {
+            "allow_files" => true,
             "allow_in_memory_shared_library_loading" => true,
             "bytecode_optimize_level_zero" => true,
             "bytecode_optimize_level_one" => true,
             "bytecode_optimize_level_two" => true,
             "extension_module_filter" => true,
+            "file_scanner_classify_files" => true,
+            "file_scanner_emit_files" => true,
             "include_distribution_sources" => true,
             "include_distribution_resources" => true,
+            "include_classified_resources" => true,
+            "include_file_resources" => true,
             "include_non_distribution_sources" => true,
             "include_test" => true,
             "preferred_extension_module_variants" => true,
@@ -167,6 +179,9 @@ impl TypedValue for PythonPackagingPolicyValue {
 
     fn set_attr(&mut self, attribute: &str, value: Value) -> Result<(), ValueError> {
         match attribute {
+            "allow_files" => {
+                self.inner.set_allow_files(value.to_bool());
+            }
             "allow_in_memory_shared_library_loading" => {
                 self.inner
                     .set_allow_in_memory_shared_library_loading(value.to_bool());
@@ -192,12 +207,24 @@ impl TypedValue for PythonPackagingPolicyValue {
 
                 self.inner.set_extension_module_filter(filter);
             }
+            "file_scanner_classify_files" => {
+                self.inner.set_file_scanner_classify_files(value.to_bool());
+            }
+            "file_scanner_emit_files" => {
+                self.inner.set_file_scanner_emit_files(value.to_bool());
+            }
+            "include_classified_resources" => {
+                self.inner.set_include_classified_resources(value.to_bool());
+            }
             "include_distribution_sources" => {
                 self.inner.set_include_distribution_sources(value.to_bool());
             }
             "include_distribution_resources" => {
                 self.inner
                     .set_include_distribution_resources(value.to_bool());
+            }
+            "include_file_resources" => {
+                self.inner.set_include_file_resources(value.to_bool());
             }
             "include_non_distribution_sources" => {
                 self.inner
@@ -282,6 +309,22 @@ impl PythonPackagingPolicyValue {
 
         Ok(Value::from(NoneType::None))
     }
+
+    fn starlark_set_resource_handling_mode(&mut self, value: &Value) -> ValueResult {
+        let value = required_str_arg("mode", value)?;
+
+        let mode = ResourceHandlingMode::try_from(value.as_str()).map_err(|e| {
+            ValueError::from(RuntimeError {
+                code: "PYOXIDIZER_BUILD",
+                message: e,
+                label: "set_resource_handling_mode()".to_string(),
+            })
+        })?;
+
+        self.inner.set_resource_handling_mode(mode);
+
+        Ok(Value::from(NoneType::None))
+    }
 }
 
 starlark_module! { python_packaging_policy_module =>
@@ -295,6 +338,13 @@ starlark_module! { python_packaging_policy_module =>
     PythonPackagingPolicy.set_preferred_extension_module_variant(this, name, value) {
         match this.clone().downcast_mut::<PythonPackagingPolicyValue>()? {
             Some(mut policy) => policy.starlark_set_preferred_extension_module_variant(&name, &value),
+            None => Err(ValueError::IncorrectParameterType),
+        }
+    }
+
+    PythonPackagingPolicy.set_resource_handling_mode(this, mode) {
+        match this.clone().downcast_mut::<PythonPackagingPolicyValue>()? {
+            Some(mut policy) => policy.starlark_set_resource_handling_mode(&mode),
             None => Err(ValueError::IncorrectParameterType),
         }
     }
@@ -344,6 +394,35 @@ mod tests {
             env.eval("policy.extension_module_filter = 'minimal'; policy.extension_module_filter")?;
         assert_eq!(value.to_string(), "minimal");
 
+        let value = env.eval("policy.file_scanner_classify_files")?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(value.to_bool());
+
+        let value = env.eval(
+            "policy.file_scanner_classify_files = False; policy.file_scanner_classify_files",
+        )?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(!value.to_bool());
+
+        let value = env.eval("policy.file_scanner_emit_files")?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(!value.to_bool());
+
+        let value =
+            env.eval("policy.file_scanner_emit_files = True; policy.file_scanner_emit_files")?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(value.to_bool());
+
+        let value = env.eval("policy.include_classified_resources")?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(value.to_bool());
+
+        let value = env.eval(
+            "policy.include_classified_resources = False; policy.include_classified_resources",
+        )?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(!value.to_bool());
+
         let value = env.eval("policy.include_distribution_sources")?;
         assert_eq!(value.get_type(), "bool");
         assert_eq!(value.to_bool(), policy.include_distribution_sources());
@@ -370,6 +449,15 @@ mod tests {
         let value = env.eval(
             "policy.include_distribution_resources = True; policy.include_distribution_resources",
         )?;
+        assert!(value.to_bool());
+
+        let value = env.eval("policy.include_file_resources")?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(!value.to_bool());
+
+        let value =
+            env.eval("policy.include_file_resources = True; policy.include_file_resources")?;
+        assert_eq!(value.get_type(), "bool");
         assert!(value.to_bool());
 
         let value = env.eval("policy.include_non_distribution_sources")?;
@@ -420,6 +508,14 @@ mod tests {
             "policy.resources_location_fallback = None; policy.resources_location_fallback",
         )?;
         assert_eq!(value.get_type(), "NoneType");
+
+        let value = env.eval("policy.allow_files")?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(!value.to_bool());
+
+        let value = env.eval("policy.allow_files = True; policy.allow_files")?;
+        assert_eq!(value.get_type(), "bool");
+        assert!(value.to_bool());
 
         let value = env.eval("policy.allow_in_memory_shared_library_loading")?;
         assert_eq!(value.get_type(), "bool");
@@ -517,6 +613,23 @@ mod tests {
         let func = policy.derive_context_callbacks[0].clone();
         assert_eq!(func.get_type(), "function");
         assert_eq!(func.to_str(), "my_func(policy, resource)");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_resource_handling_mode() -> Result<()> {
+        let mut env = StarlarkEnvironment::new()?;
+
+        env.eval("dist = default_python_distribution()")?;
+        env.eval("policy = dist.make_python_packaging_policy()")?;
+
+        assert!(env
+            .eval("policy.set_resource_handling_mode('invalid')")
+            .is_err());
+
+        env.eval("policy.set_resource_handling_mode('classify')")?;
+        env.eval("policy.set_resource_handling_mode('files')")?;
 
         Ok(())
     }

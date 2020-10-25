@@ -51,6 +51,40 @@ impl AsRef<str> for ExtensionModuleFilter {
     }
 }
 
+/// Describes how resources should be handled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResourceHandlingMode {
+    /// Files should be classified as typed resources.
+    Classify,
+
+    /// Files should be handled as files.
+    Files,
+}
+
+impl TryFrom<&str> for ResourceHandlingMode {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "classify" => Ok(Self::Classify),
+            "files" => Ok(Self::Files),
+            _ => Err(format!(
+                "{} is not a valid resource handling mode; use \"classify\" or \"files\"",
+                value
+            )),
+        }
+    }
+}
+
+impl AsRef<str> for ResourceHandlingMode {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Classify => "classify",
+            Self::Files => "files",
+        }
+    }
+}
+
 /// Defines how Python resources should be packaged.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PythonPackagingPolicy {
@@ -75,6 +109,36 @@ pub struct PythonPackagingPolicy {
     /// can get overrules by platform-specific capabilities.
     allow_in_memory_shared_library_loading: bool,
 
+    /// Whether untyped files are allowed.
+    ///
+    /// If true, `FileData` instances can be added to the resource collector.
+    ///
+    /// If false, resources must be strongly typed (`PythonModuleSource`,
+    /// `PythonPackageResource`, etc).
+    allow_files: bool,
+
+    /// Whether file scanning should emit `PythonResource::File` variants.
+    ///
+    /// If true, this resource variant is emitted when scanning for
+    /// resources. If false, it isn't.
+    ///
+    /// This effectively says whether the file scanner should emit records
+    /// corresponding to the actual file.
+    file_scanner_emit_files: bool,
+
+    /// Whether file scanning should classify files and emit `PythonResource::*`
+    /// variants.
+    ///
+    /// If true, the file scanner will attempt to classify every file as
+    /// a specific resource type and emit a `PythonResource::*` variant
+    /// corresponding to the resource type.
+    ///
+    /// If false, this classification is not performed.
+    file_scanner_classify_files: bool,
+
+    /// Whether to classify non-`File` resources as `include = True` by default.
+    include_classified_resources: bool,
+
     /// Whether to include source module from the Python distribution.
     include_distribution_sources: bool,
 
@@ -86,6 +150,9 @@ pub struct PythonPackagingPolicy {
 
     /// Whether to include test files.
     include_test: bool,
+
+    /// Whether to classify `File` resources as `include = True` by default.
+    include_file_resources: bool,
 
     /// Mapping of target triple to list of extensions that don't work for that triple.
     ///
@@ -111,10 +178,15 @@ impl Default for PythonPackagingPolicy {
             resources_location: ConcreteResourceLocation::InMemory,
             resources_location_fallback: None,
             allow_in_memory_shared_library_loading: false,
+            allow_files: false,
+            file_scanner_emit_files: false,
+            file_scanner_classify_files: true,
+            include_classified_resources: true,
             include_distribution_sources: true,
             include_non_distribution_sources: true,
             include_distribution_resources: false,
             include_test: false,
+            include_file_resources: false,
             broken_extensions: HashMap::new(),
             bytecode_optimize_level_zero: true,
             bytecode_optimize_level_one: false,
@@ -170,6 +242,36 @@ impl PythonPackagingPolicy {
         self.resources_location_fallback = location;
     }
 
+    /// Whether to allow untyped `FileData` resources.
+    pub fn allow_files(&self) -> bool {
+        self.allow_files
+    }
+
+    /// Set whether to allow untyped `FileData` resources.
+    pub fn set_allow_files(&mut self, value: bool) {
+        self.allow_files = value;
+    }
+
+    /// Whether file scanning should emit `PythonResource::File` variants.
+    pub fn file_scanner_emit_files(&self) -> bool {
+        self.file_scanner_emit_files
+    }
+
+    /// Set whether file scanning should emit `PythonResource::File` variants.
+    pub fn set_file_scanner_emit_files(&mut self, value: bool) {
+        self.file_scanner_emit_files = value;
+    }
+
+    /// Whether file scanning should classify files into `PythonResource::*` variants.
+    pub fn file_scanner_classify_files(&self) -> bool {
+        self.file_scanner_classify_files
+    }
+
+    /// Set whether file scanning should classify files into `PythonResource::*` variants.
+    pub fn set_file_scanner_classify_files(&mut self, value: bool) {
+        self.file_scanner_classify_files = value;
+    }
+
     /// Whether to allow in-memory shared library loading.
     pub fn allow_in_memory_shared_library_loading(&self) -> bool {
         self.allow_in_memory_shared_library_loading
@@ -220,6 +322,26 @@ impl PythonPackagingPolicy {
         self.include_test = include;
     }
 
+    /// Get whether to classify `File` resources as include by default.
+    pub fn include_file_resources(&self) -> bool {
+        self.include_file_resources
+    }
+
+    /// Set whether to classify `File` resources as include by default.
+    pub fn set_include_file_resources(&mut self, value: bool) {
+        self.include_file_resources = value;
+    }
+
+    /// Get whether to classify non-`File` resources as include by default.
+    pub fn include_classified_resources(&self) -> bool {
+        self.include_classified_resources
+    }
+
+    /// Set whether to classify non-`File` resources as include by default.
+    pub fn set_include_classified_resources(&mut self, value: bool) {
+        self.include_classified_resources = value;
+    }
+
     /// Whether to write bytecode at optimization level 0.
     pub fn bytecode_optimize_level_zero(&self) -> bool {
         self.bytecode_optimize_level_zero
@@ -248,6 +370,29 @@ impl PythonPackagingPolicy {
     /// Set whether to write bytecode at optimization level 2.
     pub fn set_bytecode_optimize_level_two(&mut self, value: bool) {
         self.bytecode_optimize_level_two = value;
+    }
+
+    /// Set the resource handling mode of the policy.
+    ///
+    /// This is a convenience function for mapping a `ResourceHandlingMode`
+    /// to corresponding field values.
+    pub fn set_resource_handling_mode(&mut self, mode: ResourceHandlingMode) {
+        match mode {
+            ResourceHandlingMode::Classify => {
+                self.file_scanner_emit_files = false;
+                self.file_scanner_classify_files = true;
+                self.allow_files = false;
+                self.include_file_resources = false;
+                self.include_classified_resources = true;
+            }
+            ResourceHandlingMode::Files => {
+                self.file_scanner_emit_files = true;
+                self.file_scanner_classify_files = false;
+                self.allow_files = true;
+                self.include_file_resources = true;
+                self.include_classified_resources = true;
+            }
+        }
     }
 
     /// Obtain broken extensions for a target triple.
@@ -311,6 +456,19 @@ impl PythonPackagingPolicy {
     /// Returns true if the resource should be included, false otherwise.
     fn filter_python_resource(&self, resource: &PythonResource) -> bool {
         match resource {
+            PythonResource::File(_) => {
+                if !self.include_file_resources {
+                    return false;
+                }
+            }
+            _ => {
+                if !self.include_classified_resources {
+                    return false;
+                }
+            }
+        }
+
+        match resource {
             PythonResource::ModuleSource(module) => {
                 if !self.include_test && module.is_test {
                     false
@@ -335,6 +493,7 @@ impl PythonPackagingPolicy {
             PythonResource::ExtensionModule(_) => false,
             PythonResource::PathExtension(_) => false,
             PythonResource::EggFile(_) => false,
+            PythonResource::File(_) => true,
         }
     }
 
@@ -454,5 +613,35 @@ impl PythonPackagingPolicy {
         }
 
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::resource::{DataLocation, FileData},
+        std::path::PathBuf,
+    };
+
+    #[test]
+    fn test_add_collection_context_file() -> Result<()> {
+        let mut policy = PythonPackagingPolicy::default();
+        policy.include_file_resources = false;
+
+        let file = FileData {
+            path: PathBuf::from("foo.py"),
+            is_executable: false,
+            data: DataLocation::Memory(vec![42]),
+        };
+
+        let add_context = policy.derive_add_collection_context(&file.clone().into());
+        assert!(!add_context.include);
+
+        policy.include_file_resources = true;
+        let add_context = policy.derive_add_collection_context(&file.into());
+        assert!(add_context.include);
+
+        Ok(())
     }
 }

@@ -473,7 +473,7 @@ impl Drop for ImporterState {
 // methods call into non-macro implemented methods named <method>_impl which
 // are defined below in separate `impl {}` blocks.
 py_class!(class OxidizedFinder |py| {
-    data state: Arc<Box<ImporterState>>;
+    data state: Arc<ImporterState>;
 
     // Start of importlib.abc.MetaPathFinder interface.
 
@@ -914,7 +914,7 @@ impl OxidizedFinder {
 
         let importer = OxidizedFinder::create_instance(
             py,
-            Arc::new(Box::new(ImporterState::new(
+            Arc::new(ImporterState::new(
                 py,
                 &m,
                 &bootstrap_module,
@@ -922,7 +922,7 @@ impl OxidizedFinder {
                 false,
                 None,
                 None,
-            )?)),
+            )?),
         )?;
 
         Ok(importer)
@@ -970,14 +970,14 @@ fn oxidized_finder_new(
     }
 
     // If we received a PyObject defining resources data, try to resolve it.
-    let (raw_resources_data, mapped) = if let Some(resources) = &resources_data {
+    let (raw_resource_datas, mapped) = if let Some(resources) = &resources_data {
         let buffer = PyBuffer::get(py, resources)?;
 
         let data = unsafe {
             std::slice::from_raw_parts::<u8>(buffer.buf_ptr() as *const _, buffer.len_bytes())
         };
 
-        (Some(data), None)
+        (vec![data], None)
     } else if let Some(resources_file) = resources_file {
         let path = pyobject_to_pathbuf(py, resources_file)?;
 
@@ -995,18 +995,18 @@ fn oxidized_finder_new(
         // lives at least as long as this slice.
         let data = unsafe { std::slice::from_raw_parts::<u8>(mapped.as_ptr(), mapped.len()) };
 
-        (Some(data), Some(mapped))
+        (vec![data], Some(mapped))
     } else {
-        (None, None)
+        (vec![], None)
     };
 
     resources_state
-        .load(raw_resources_data)
+        .load(&raw_resource_datas)
         .map_err(|err| PyErr::new::<ValueError, _>(py, err))?;
 
     let importer = OxidizedFinder::create_instance(
         py,
-        Arc::new(Box::new(ImporterState::new(
+        Arc::new(ImporterState::new(
             py,
             &m,
             &bootstrap_module,
@@ -1014,7 +1014,7 @@ fn oxidized_finder_new(
             true,
             resources_data,
             mapped,
-        )?)),
+        )?),
     )?;
 
     // We effectively transferred ownership of resources_state just above.
@@ -1091,7 +1091,7 @@ impl OxidizedFinder {
 //
 // Implements importlib.abc.ResourceReader.
 py_class!(class OxidizedResourceReader |py| {
-    data state: Arc<Box<ImporterState>>;
+    data state: Arc<ImporterState>;
     data package: String;
 
     def open_resource(&self, resource: &PyString) -> PyResult<PyObject> {
@@ -1181,7 +1181,7 @@ impl OxidizedResourceReader {
 //
 // This implements importlib.abc.Traversable.
 py_class!(class PyOxidizerTraversable |py| {
-    data state: Arc<Box<ImporterState>>;
+    data state: Arc<ImporterState>;
     data path: String;
 
     // Yield Traversable objects in self.

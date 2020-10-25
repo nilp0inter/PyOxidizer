@@ -9,7 +9,7 @@ use {
         filesystem_scanning::PythonResourceIterator,
         module_util::PythonModuleSuffixes,
         package_metadata::PythonPackageMetadata,
-        resource::{DataLocation, PythonResource},
+        resource::{DataLocation, FileData, PythonResource},
     },
     anyhow::{anyhow, Context, Result},
     lazy_static::lazy_static,
@@ -30,9 +30,11 @@ lazy_static! {
         regex::Regex::new(r"^(?P<namever>(?P<name>.+?)-(?P<ver>.+?))(-(?P<build>\d[^-]*))?-(?P<pyver>.+?)-(?P<abi>.+?)-(?P<plat>.+?)\.whl$").unwrap();
 }
 
+const S_IXUSR: u32 = 64;
+
 /// Represents a Python wheel archive.
 pub struct WheelArchive {
-    files: HashMap<String, Vec<u8>>,
+    files: HashMap<String, FileData>,
     name_version: String,
 }
 
@@ -63,7 +65,14 @@ impl WheelArchive {
             let mut file = archive.by_index(i)?;
             let mut buffer = Vec::with_capacity(file.size() as usize);
             file.read_to_end(&mut buffer)?;
-            files.insert(file.name().to_string(), buffer);
+            files.insert(
+                file.name().to_string(),
+                FileData {
+                    path: PathBuf::from(file.name()),
+                    is_executable: file.unix_mode().unwrap_or(0) & S_IXUSR != 0,
+                    data: DataLocation::Memory(buffer),
+                },
+            );
         }
 
         Ok(Self {
@@ -98,24 +107,24 @@ impl WheelArchive {
     pub fn archive_metadata(&self) -> Result<PythonPackageMetadata> {
         let path = format!("{}/WHEEL", self.dist_info_path());
 
-        let data = self
+        let file = self
             .files
             .get(&path)
             .ok_or_else(|| anyhow!("{} does not exist", path))?;
 
-        PythonPackageMetadata::from_metadata(data)
+        PythonPackageMetadata::from_metadata(&file.data.resolve()?)
     }
 
     /// Obtain the `.dist-info/METADATA` content as a parsed object.
     pub fn metadata(&self) -> Result<PythonPackageMetadata> {
         let path = format!("{}/METADATA", self.dist_info_path());
 
-        let data = self
+        let file = self
             .files
             .get(&path)
             .ok_or_else(|| anyhow!("{} does not exist", path))?;
 
-        PythonPackageMetadata::from_metadata(data)
+        PythonPackageMetadata::from_metadata(&file.data.resolve()?)
     }
 
     /// Obtain the first header value from the archive metadata file.
@@ -175,13 +184,13 @@ impl WheelArchive {
     ///
     /// The returned `PathBuf` are prefixed with the appropriate `*.dist-info`
     /// directory.
-    pub fn dist_info_files(&self) -> Vec<(PathBuf, DataLocation)> {
+    pub fn dist_info_files(&self) -> Vec<FileData> {
         let prefix = format!("{}/", self.dist_info_path());
         self.files
             .iter()
             .filter_map(|(k, v)| {
                 if k.starts_with(&prefix) {
-                    Some((PathBuf::from(k), DataLocation::Memory(v.clone())))
+                    Some(v.clone())
                 } else {
                     None
                 }
@@ -190,17 +199,18 @@ impl WheelArchive {
     }
 
     /// Obtain paths in a `.data/*/` directory.
-    fn data_paths(&self, key: &str) -> Vec<(PathBuf, DataLocation)> {
+    fn data_paths(&self, key: &str) -> Vec<FileData> {
         let prefix = format!("{}.data/{}/", self.name_version, key);
 
         self.files
             .iter()
             .filter_map(|(k, v)| {
                 if k.starts_with(&prefix) {
-                    Some((
-                        PathBuf::from(&k[prefix.len()..]),
-                        DataLocation::Memory(v.clone()),
-                    ))
+                    Some(FileData {
+                        path: PathBuf::from(&k[prefix.len()..]),
+                        is_executable: v.is_executable,
+                        data: v.data.clone(),
+                    })
                 } else {
                     None
                 }
@@ -211,21 +221,21 @@ impl WheelArchive {
     /// Obtain files that should be installed to `purelib`.
     ///
     /// `*.data/purelib/` prefix is stripped from returned `PathBuf`.
-    pub fn purelib_files(&self) -> Vec<(PathBuf, DataLocation)> {
+    pub fn purelib_files(&self) -> Vec<FileData> {
         self.data_paths("purelib")
     }
 
     /// Obtain files that should be installed to `platlib`.
     ///
     /// `*.data/platlib/` prefix is stripped from returned `PathBuf`.
-    pub fn platlib_files(&self) -> Vec<(PathBuf, DataLocation)> {
+    pub fn platlib_files(&self) -> Vec<FileData> {
         self.data_paths("platlib")
     }
 
     /// Obtain files that should be installed to `headers`.
     ///
     /// `*.data/headers/` prefix is stripped from returned `PathBuf`.
-    pub fn headers_files(&self) -> Vec<(PathBuf, DataLocation)> {
+    pub fn headers_files(&self) -> Vec<FileData> {
         self.data_paths("headers")
     }
 
@@ -234,14 +244,14 @@ impl WheelArchive {
     /// `*.data/scripts/` prefix is stripped from returned `PathBuf`.
     ///
     /// TODO support optional argument to rewrite `#!python` shebangs.
-    pub fn scripts_files(&self) -> Vec<(PathBuf, DataLocation)> {
+    pub fn scripts_files(&self) -> Vec<FileData> {
         self.data_paths("scripts")
     }
 
     /// Obtain files that should be installed to `data`.
     ///
     /// `*.data/data/` prefix is stripped from returned `PathBuf`.
-    pub fn data_files(&self) -> Vec<(PathBuf, DataLocation)> {
+    pub fn data_files(&self) -> Vec<FileData> {
         self.data_paths("data")
     }
 
@@ -251,7 +261,7 @@ impl WheelArchive {
     ///
     /// The returned `PathBuf` has the same path as the file in the
     /// wheel archive.
-    pub fn regular_files(&self) -> Vec<(PathBuf, DataLocation)> {
+    pub fn regular_files(&self) -> Vec<FileData> {
         let dist_info_prefix = format!("{}/", self.dist_info_path());
         let data_prefix = format!("{}/", self.data_path());
 
@@ -261,7 +271,7 @@ impl WheelArchive {
                 if k.starts_with(&dist_info_prefix) || k.starts_with(&data_prefix) {
                     None
                 } else {
-                    Some((PathBuf::from(k), DataLocation::Memory(v.clone())))
+                    Some(v.clone())
                 }
             })
             .collect::<Vec<_>>()
@@ -272,6 +282,8 @@ impl WheelArchive {
         &self,
         cache_tag: &str,
         suffixes: &PythonModuleSuffixes,
+        emit_files: bool,
+        classify_files: bool,
     ) -> Result<Vec<PythonResource<'a>>> {
         // The filesystem scanning code relies on the final install layout.
         // So we need to simulate that.
@@ -292,7 +304,13 @@ impl WheelArchive {
         // Other data keys are `headers` and `scripts`, which we don't yet
         // support as resource types.
 
-        PythonResourceIterator::from_data_locations(&inputs, cache_tag, suffixes)
-            .collect::<Result<Vec<_>>>()
+        PythonResourceIterator::from_data_locations(
+            &inputs,
+            cache_tag,
+            suffixes,
+            emit_files,
+            classify_files,
+        )
+        .collect::<Result<Vec<_>>>()
     }
 }

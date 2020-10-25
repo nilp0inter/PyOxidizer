@@ -47,6 +47,7 @@ use {
     },
 };
 
+// TODO merge this into `FileValue`?
 #[derive(Clone, Debug)]
 pub struct FileContentValue {
     pub content: FileContent,
@@ -149,7 +150,7 @@ impl TypedValue for FileManifestValue {
     type Holder = Mutable<FileManifestValue>;
     const TYPE: &'static str = "FileManifest";
 
-    fn values_for_descendant_check_and_freeze<'a>(&'a self) -> Box<dyn Iterator<Item = Value>> {
+    fn values_for_descendant_check_and_freeze(&self) -> Box<dyn Iterator<Item = Value>> {
         Box::new(std::iter::empty())
     }
 }
@@ -628,7 +629,7 @@ mod tests {
 
     #[test]
     fn test_add_python_resources() {
-        starlark_ok("dist = default_python_distribution(); m = FileManifest(); m.add_python_resources('lib', dist.source_modules())");
+        starlark_ok("dist = default_python_distribution(); m = FileManifest(); m.add_python_resources('lib', dist.python_resources())");
     }
 
     #[test]

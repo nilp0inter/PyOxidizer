@@ -13,7 +13,7 @@ use {
     python_packaging::{
         policy::PythonPackagingPolicy,
         resource::{
-            PythonExtensionModule, PythonModuleSource, PythonPackageDistributionResource,
+            FileData, PythonExtensionModule, PythonModuleSource, PythonPackageDistributionResource,
             PythonPackageResource, PythonResource,
         },
         resource_collection::{PrePackagedResource, PythonResourceAddCollectionContext},
@@ -23,6 +23,7 @@ use {
         fs::File,
         io::Write,
         path::{Path, PathBuf},
+        sync::Arc,
     },
 };
 
@@ -55,7 +56,7 @@ pub type ResourceAddCollectionContextCallback<'a> = Box<
 /// themselves.
 pub trait PythonBinaryBuilder {
     /// Clone self into a Box'ed trait object.
-    fn clone_box(&self) -> Box<dyn PythonBinaryBuilder>;
+    fn clone_trait(&self) -> Arc<dyn PythonBinaryBuilder>;
 
     /// The name of the binary.
     fn name(&self) -> String;
@@ -78,6 +79,18 @@ pub trait PythonBinaryBuilder {
     /// Path to Python executable that is native to the target architecture.
     // TODO this should not need to exist if we properly supported cross-compiling.
     fn target_python_exe_path(&self) -> &Path;
+
+    /// The directory to install tcl/tk files into.
+    fn tcl_files_path(&self) -> &Option<String>;
+
+    /// Set the directory to install tcl/tk files into.
+    fn set_tcl_files_path(&mut self, value: Option<String>);
+
+    /// The value of the `windows_subsystem` Rust attribute for the generated Rust project.
+    fn windows_subsystem(&self) -> &str;
+
+    /// Set the value of the `windows_subsystem` Rust attribute for generated Rust projects.
+    fn set_windows_subsystem(&mut self, value: &str) -> Result<()>;
 
     /// Obtain an iterator over all resource entries that will be embedded in the binary.
     ///
@@ -197,6 +210,13 @@ pub trait PythonBinaryBuilder {
     fn add_python_extension_module(
         &mut self,
         extension_module: &PythonExtensionModule,
+        add_context: Option<PythonResourceAddCollectionContext>,
+    ) -> Result<()>;
+
+    /// Add a `FileData` to the resource collection.
+    fn add_file_data(
+        &mut self,
+        file: &FileData,
         add_context: Option<PythonResourceAddCollectionContext>,
     ) -> Result<()>;
 

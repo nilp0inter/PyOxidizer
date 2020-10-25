@@ -8,21 +8,17 @@ use {
         python_executable::PythonExecutable,
         python_interpreter_config::PythonInterpreterConfigValue,
         python_packaging_policy::PythonPackagingPolicyValue,
-        python_resource::{
-            add_context_for_value, python_resource_to_value, PythonExtensionModuleValue,
-            PythonModuleSourceValue, PythonPackageResourceValue,
-        },
-        util::{optional_str_arg, optional_type_arg, required_bool_arg, required_str_arg},
+        python_resource::{add_context_for_value, python_resource_to_value},
+        util::{optional_str_arg, optional_type_arg, required_str_arg},
     },
     crate::py_packaging::{
         distribution::BinaryLibpythonLinkMode,
         distribution::{
-            default_distribution_location, is_stdlib_test_package, resolve_distribution,
-            DistributionFlavor, PythonDistribution, PythonDistributionLocation,
+            default_distribution_location, DistributionFlavor, PythonDistribution,
+            PythonDistributionLocation,
         },
     },
     anyhow::{anyhow, Result},
-    itertools::Itertools,
     python_packaging::{
         policy::PythonPackagingPolicy, resource::PythonResource,
         resource_collection::PythonResourceAddCollectionContext,
@@ -40,12 +36,7 @@ use {
             starlark_signature_extraction, starlark_signatures,
         },
     },
-    std::{
-        convert::TryFrom,
-        ops::DerefMut,
-        path::{Path, PathBuf},
-        sync::Arc,
-    },
+    std::{convert::TryFrom, sync::Arc},
 };
 
 /// A Starlark Value wrapper for `PythonDistribution` traits.
@@ -53,23 +44,16 @@ pub struct PythonDistributionValue {
     /// Where the distribution should be obtained from.
     pub source: PythonDistributionLocation,
 
-    /// Directory where distribution should be extracted.
-    dest_dir: PathBuf,
-
     /// The actual distribution.
     ///
     /// Populated on first read.
-    pub distribution: Option<Arc<Box<dyn PythonDistribution>>>,
+    pub distribution: Option<Arc<dyn PythonDistribution>>,
 }
 
 impl PythonDistributionValue {
-    fn from_location(
-        location: PythonDistributionLocation,
-        dest_dir: &Path,
-    ) -> PythonDistributionValue {
+    fn from_location(location: PythonDistributionLocation) -> PythonDistributionValue {
         PythonDistributionValue {
             source: location,
-            dest_dir: dest_dir.to_path_buf(),
             distribution: None,
         }
     }
@@ -78,26 +62,21 @@ impl PythonDistributionValue {
         &mut self,
         type_values: &TypeValues,
         label: &str,
-    ) -> Result<Arc<Box<dyn PythonDistribution>>, ValueError> {
+    ) -> Result<Arc<dyn PythonDistribution>, ValueError> {
         if self.distribution.is_none() {
             let raw_context = get_context(type_values)?;
             let context = raw_context
                 .downcast_mut::<EnvironmentContext>()?
                 .ok_or(ValueError::IncorrectParameterType)?;
 
-            self.distribution = Some(Arc::new(
+            self.distribution = Some(
                 context
                     .distribution_cache
-                    .lock()
-                    .map_err(|e| {
-                        ValueError::from(RuntimeError {
-                            code: "PYOXIDIZER_BUILD",
-                            message: format!("cannot lock distribution cache: {}", e),
-                            label: label.to_string(),
-                        })
-                    })?
-                    .deref_mut()
-                    .resolve_distribution(&context.logger, &self.source, Some(&self.dest_dir))
+                    .resolve_distribution(
+                        &context.logger,
+                        &self.source,
+                        Some(&context.python_distributions_path),
+                    )
                     .map_err(|e| {
                         ValueError::from(RuntimeError {
                             code: "PYOXIDIZER_BUILD",
@@ -105,8 +84,8 @@ impl PythonDistributionValue {
                             label: label.to_string(),
                         })
                     })?
-                    .clone_box(),
-            ));
+                    .clone_trait(),
+            );
         }
 
         Ok(self.distribution.as_ref().unwrap().clone())
@@ -171,25 +150,11 @@ impl PythonDistributionValue {
                 })
             })?;
 
-        let raw_context = get_context(type_values)?;
-        let context = raw_context
-            .downcast_ref::<EnvironmentContext>()
-            .ok_or(ValueError::IncorrectParameterType)?;
-
-        Ok(Value::new(PythonDistributionValue::from_location(
-            location,
-            &context.python_distributions_path,
-        )))
+        Ok(Value::new(PythonDistributionValue::from_location(location)))
     }
 
     /// PythonDistribution()
-    fn from_args(
-        type_values: &TypeValues,
-        sha256: &Value,
-        local_path: &Value,
-        url: &Value,
-        flavor: &Value,
-    ) -> ValueResult {
+    fn from_args(sha256: &Value, local_path: &Value, url: &Value, flavor: &Value) -> ValueResult {
         required_str_arg("sha256", sha256)?;
         optional_str_arg("local_path", local_path)?;
         optional_str_arg("url", url)?;
@@ -226,14 +191,8 @@ impl PythonDistributionValue {
             }
         }
 
-        let raw_context = get_context(type_values)?;
-        let context = raw_context
-            .downcast_ref::<EnvironmentContext>()
-            .ok_or(ValueError::IncorrectParameterType)?;
-
         Ok(Value::new(PythonDistributionValue::from_location(
             distribution,
-            &context.python_distributions_path,
         )))
     }
 
@@ -354,20 +313,23 @@ impl PythonDistributionValue {
                 })
             })?;
 
-            Some(Arc::new(
-                resolve_distribution(
-                    &context.logger,
-                    &location,
-                    &context.python_distributions_path,
-                )
-                .map_err(|e| {
-                    ValueError::from(RuntimeError {
-                        code: "PYOXIDIZER_BUILD",
-                        message: format!("unable to resolve host Python distribution: {}", e),
-                        label: "to_python_executable".to_string(),
-                    })
-                })?,
-            ))
+            Some(
+                context
+                    .distribution_cache
+                    .resolve_distribution(
+                        &context.logger,
+                        &location,
+                        Some(&context.python_distributions_path),
+                    )
+                    .map_err(|e| {
+                        ValueError::from(RuntimeError {
+                            code: "PYOXIDIZER_BUILD",
+                            message: format!("unable to resolve host Python distribution: {}", e),
+                            label: "to_python_executable".to_string(),
+                        })
+                    })?
+                    .clone_trait(),
+            )
         };
 
         let mut builder = dist
@@ -433,74 +395,35 @@ impl PythonDistributionValue {
         Ok(Value::new(PythonExecutable::new(builder, policy)))
     }
 
-    /// PythonDistribution.extension_modules()
-    pub fn extension_modules(&mut self, type_values: &TypeValues) -> ValueResult {
-        let dist = self.resolve_distribution(type_values, "resolve_distribution()")?;
-
-        Ok(Value::from(
-            dist.iter_extension_modules()
-                .map(|em| Value::new(PythonExtensionModuleValue::new(em.clone())))
-                .collect_vec(),
-        ))
-    }
-
-    /// PythonDistribution.package_resources(include_test=false)
-    pub fn package_resources(
+    pub fn python_resources_starlark(
         &mut self,
         type_values: &TypeValues,
-        include_test: &Value,
+        call_stack: &mut CallStack,
     ) -> ValueResult {
-        let include_test = required_bool_arg("include_test", &include_test)?;
-
-        let dist = self.resolve_distribution(type_values, "resolve_distribution()")?;
-
-        let resources = dist.resource_datas().map_err(|e| {
-            ValueError::from(RuntimeError {
-                code: "PYTHON_DISTRIBUTION",
-                message: e.to_string(),
-                label: e.to_string(),
-            })
-        })?;
-
-        Ok(Value::from(
-            resources
-                .iter()
-                .filter_map(|data| {
-                    if !include_test && is_stdlib_test_package(&data.leaf_package) {
-                        None
-                    } else {
-                        Some(Value::new(PythonPackageResourceValue::new(data.clone())))
-                    }
-                })
-                .collect_vec(),
-        ))
-    }
-
-    /// PythonDistribution.source_modules()
-    pub fn source_modules(&mut self, type_values: &TypeValues) -> ValueResult {
         let dist = self.resolve_distribution(type_values, "resolve_distribution")?;
+        let policy =
+            PythonPackagingPolicyValue::new(dist.create_packaging_policy().map_err(|e| {
+                ValueError::from(RuntimeError {
+                    code: "PYOXIDIZER_BUILD",
+                    message: e.to_string(),
+                    label: "python_resources()".to_string(),
+                })
+            })?);
 
-        let modules = dist.source_modules().map_err(|e| {
-            ValueError::from(RuntimeError {
-                code: "PYTHON_DISTRIBUTION",
-                message: e.to_string(),
-                label: e.to_string(),
-            })
-        })?;
+        let values = dist
+            .python_resources()
+            .iter()
+            .map(|resource| python_resource_to_value(type_values, call_stack, resource, &policy))
+            .collect::<Result<Vec<Value>, ValueError>>()?;
 
-        Ok(Value::from(
-            modules
-                .iter()
-                .map(|module| Value::new(PythonModuleSourceValue::new(module.clone())))
-                .collect_vec(),
-        ))
+        Ok(Value::from(values))
     }
 }
 
 starlark_module! { python_distribution_module =>
     #[allow(non_snake_case, clippy::ptr_arg)]
-    PythonDistribution(env env, sha256, local_path=NoneType::None, url=NoneType::None, flavor="standalone") {
-        PythonDistributionValue::from_args(&env, &sha256, &local_path, &url, &flavor)
+    PythonDistribution(sha256, local_path=NoneType::None, url=NoneType::None, flavor="standalone") {
+        PythonDistributionValue::from_args(&sha256, &local_path, &url, &flavor)
     }
 
     PythonDistribution.make_python_packaging_policy(env env, this) {
@@ -517,26 +440,9 @@ starlark_module! { python_distribution_module =>
         }
     }
 
-    #[allow(clippy::ptr_arg)]
-    PythonDistribution.extension_modules(env env, this) {
+    PythonDistribution.python_resources(env env, call_stack cs, this) {
         match this.clone().downcast_mut::<PythonDistributionValue>()? {
-            Some(mut dist) => dist.extension_modules(&env),
-            None => Err(ValueError::IncorrectParameterType),
-        }
-    }
-
-    #[allow(clippy::ptr_arg)]
-    PythonDistribution.source_modules(env env, this) {
-        match this.clone().downcast_mut::<PythonDistributionValue>()? {
-            Some(mut dist) => dist.source_modules(&env),
-            None => Err(ValueError::IncorrectParameterType),
-        }
-    }
-
-    #[allow(clippy::ptr_arg)]
-    PythonDistribution.package_resources(env env, this, include_test=false) {
-        match this.clone().downcast_mut::<PythonDistributionValue>()? {
-            Some(mut dist) => dist.package_resources(&env, &include_test),
+            Some(mut dist) => dist.python_resources_starlark(&env, cs),
             None => Err(ValueError::IncorrectParameterType),
         }
     }
@@ -576,7 +482,12 @@ starlark_module! { python_distribution_module =>
 #[cfg(test)]
 mod tests {
     use {
-        super::super::testutil::*, super::*, crate::py_packaging::distribution::DistributionFlavor,
+        super::super::python_resource::{
+            PythonExtensionModuleValue, PythonModuleSourceValue, PythonPackageResourceValue,
+        },
+        super::super::testutil::*,
+        super::*,
+        crate::py_packaging::distribution::DistributionFlavor,
         crate::python_distributions::PYTHON_DISTRIBUTIONS,
     };
 
@@ -717,41 +628,35 @@ mod tests {
     }
 
     #[test]
-    fn test_source_modules() {
-        let mods = starlark_ok("default_python_distribution().source_modules()");
-        assert_eq!(mods.get_type(), "list");
+    fn test_python_resources() {
+        let resources = starlark_ok("default_python_distribution().python_resources()");
+        assert_eq!(resources.get_type(), "list");
 
-        for m in mods.iter().unwrap().iter() {
-            assert_eq!(m.get_type(), PythonModuleSourceValue::TYPE);
-            assert!(m.get_attr("is_stdlib").unwrap().to_bool());
-        }
-    }
+        let values = resources.iter().unwrap().to_vec();
 
-    #[test]
-    fn test_package_resources() {
-        let data_default = starlark_ok("default_python_distribution().package_resources()");
-        let data_tests =
-            starlark_ok("default_python_distribution().package_resources(include_test=True)");
+        assert!(values.len() > 100);
 
-        let default_length = data_default.length().unwrap();
-        let data_length = data_tests.length().unwrap();
+        assert!(values
+            .iter()
+            .any(|v| v.get_type() == PythonModuleSourceValue::TYPE));
+        assert!(values
+            .iter()
+            .any(|v| v.get_type() == PythonExtensionModuleValue::TYPE));
+        assert!(values
+            .iter()
+            .any(|v| v.get_type() == PythonPackageResourceValue::TYPE));
 
-        assert!(default_length < data_length);
-
-        for r in data_tests.iter().unwrap().iter() {
-            assert_eq!(r.get_type(), PythonPackageResourceValue::TYPE);
-            assert!(r.get_attr("is_stdlib").unwrap().to_bool());
-        }
-    }
-
-    #[test]
-    fn test_extension_modules() {
-        let mods = starlark_ok("default_python_distribution().extension_modules()");
-        assert_eq!(mods.get_type(), "list");
-
-        for m in mods.iter().unwrap().iter() {
-            assert_eq!(m.get_type(), PythonExtensionModuleValue::TYPE);
-            assert!(m.get_attr("is_stdlib").unwrap().to_bool());
-        }
+        assert!(values
+            .iter()
+            .filter(|v| v.get_type() == PythonModuleSourceValue::TYPE)
+            .all(|v| v.get_attr("is_stdlib").unwrap().to_bool()));
+        assert!(values
+            .iter()
+            .filter(|v| v.get_type() == PythonExtensionModuleValue::TYPE)
+            .all(|v| v.get_attr("is_stdlib").unwrap().to_bool()));
+        assert!(values
+            .iter()
+            .filter(|v| v.get_type() == PythonPackageResourceValue::TYPE)
+            .all(|v| v.get_attr("is_stdlib").unwrap().to_bool()));
     }
 }

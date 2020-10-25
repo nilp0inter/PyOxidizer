@@ -71,7 +71,7 @@ this instance into the constructed ``PythonExecutable``:
 
    def make_exe(dist):
        config = dist.make_python_interpreter_config()
-       config.run_mode = "eval:print('hello, world')"
+       config.run_code = "print('hello, world')"
 
        return dist.to_python_executable("myapp", config=config)
 
@@ -159,7 +159,7 @@ example:
 
        m.add_python_resource(".", exe)
 
-       templates = glob("/path/to/project/templates/**/*", strip_prefix="/path/to/project/")
+       templates = glob(["/path/to/project/templates/**/*"], strip_prefix="/path/to/project/")
        m.add_manifest(templates)
 
        return m

@@ -137,33 +137,17 @@ Examples:
 Methods
 =======
 
-``PythonDistribution.source_modules()``
----------------------------------------
+``PythonDistribution.python_resources()``
+-----------------------------------------
 
-Returns a ``list`` of
-:ref:`config_type_python_module_source`
-representing Python source modules present in this distribution.
+Returns a ``list`` of objects representing Python resources in this
+distribution. Returned values can be
+:ref:`config_type_python_module_source`,
+:ref:`config_type_python_extension_module`,
+:ref:`config_type_python_package_resource`, etc.
 
-``PythonDistribution.package_resources()``
-------------------------------------------
-
-Returns a ``list`` of
-:ref:`config_type_python_package_resource`
-representing resource files present in this distribution.
-
-The ``include_test`` boolean argument controls whether resources associated
-with test packages are included.
-
-.. _config_python_distribution_extension_modules:
-
-``PythonDistribution.extension_modules()``
-------------------------------------------
-
-Returns a ``list`` of
-:ref:`config_type_python_extension_module`
-representing extension modules in this distribution.
-
-There may exist multiple extensions with the same name.
+There may be multiple :ref:`config_type_python_extension_module` with
+the same name.
 
 .. _config_python_distribution_make_python_interpreter_config:
 

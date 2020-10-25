@@ -8,14 +8,15 @@ use {
         python_embedded_resources::PythonEmbeddedResources,
         python_packaging_policy::PythonPackagingPolicyValue,
         python_resource::{
-            is_resource_starlark_compatible, python_resource_to_value, PythonExtensionModuleValue,
-            PythonModuleSourceValue, PythonPackageDistributionResourceValue,
-            PythonPackageResourceValue, ResourceCollectionContext,
+            is_resource_starlark_compatible, python_resource_to_value, FileValue,
+            PythonExtensionModuleValue, PythonModuleSourceValue,
+            PythonPackageDistributionResourceValue, PythonPackageResourceValue,
+            ResourceCollectionContext,
         },
         target::{BuildContext, BuildTarget, ResolvedTarget, RunMode},
         util::{
             optional_dict_arg, optional_list_arg, required_bool_arg, required_list_arg,
-            required_str_arg,
+            required_str_arg, ToOptional,
         },
     },
     crate::{project_building::build_python_executable, py_packaging::binary::PythonBinaryBuilder},
@@ -26,7 +27,9 @@ use {
         environment::TypeValues,
         eval::call_stack::CallStack,
         values::{
-            error::{RuntimeError, ValueError, INCORRECT_PARAMETER_TYPE_ERROR_CODE},
+            error::{
+                RuntimeError, UnsupportedOperation, ValueError, INCORRECT_PARAMETER_TYPE_ERROR_CODE,
+            },
             none::NoneType,
             {Mutable, TypedValue, Value, ValueResult},
         },
@@ -79,6 +82,57 @@ impl TypedValue for PythonExecutable {
         &'a self,
     ) -> Box<dyn Iterator<Item = Value> + 'a> {
         Box::new(self.policy.iter().cloned())
+    }
+
+    fn get_attr(&self, attribute: &str) -> ValueResult {
+        match attribute {
+            "tcl_files_path" => match self.exe.tcl_files_path() {
+                Some(value) => Ok(Value::from(value.to_string())),
+                None => Ok(Value::from(NoneType::None)),
+            },
+            "windows_subsystem" => Ok(Value::from(self.exe.windows_subsystem())),
+            _ => Err(ValueError::OperationNotSupported {
+                op: UnsupportedOperation::GetAttr(attribute.to_string()),
+                left: Self::TYPE.to_string(),
+                right: None,
+            }),
+        }
+    }
+
+    fn has_attr(&self, attribute: &str) -> Result<bool, ValueError> {
+        Ok(match attribute {
+            "tcl_files_path" => true,
+            "windows_subsystem" => true,
+            _ => false,
+        })
+    }
+
+    fn set_attr(&mut self, attribute: &str, value: Value) -> Result<(), ValueError> {
+        match attribute {
+            "tcl_files_path" => {
+                self.exe.set_tcl_files_path(value.to_optional());
+
+                Ok(())
+            }
+            "windows_subsystem" => {
+                self.exe
+                    .set_windows_subsystem(value.to_string().as_str())
+                    .map_err(|e| {
+                        ValueError::from(RuntimeError {
+                            code: INCORRECT_PARAMETER_TYPE_ERROR_CODE,
+                            message: e.to_string(),
+                            label: format!("{}.{}", Self::TYPE, attribute),
+                        })
+                    })?;
+
+                Ok(())
+            }
+            _ => Err(ValueError::OperationNotSupported {
+                op: UnsupportedOperation::SetAttr(attribute.to_string()),
+                left: Self::TYPE.to_string(),
+                right: None,
+            }),
+        }
     }
 }
 
@@ -515,6 +569,29 @@ impl PythonExecutable {
         Ok(Value::new(NoneType::None))
     }
 
+    pub fn add_file_data(
+        &mut self,
+        context: &EnvironmentContext,
+        label: &str,
+        file: &FileValue,
+    ) -> ValueResult {
+        info!(
+            &context.logger,
+            "adding file data {}", file.inner.path.display();
+        );
+        self.exe
+            .add_file_data(&file.inner, file.add_collection_context().clone())
+            .map_err(|e| {
+                ValueError::from(RuntimeError {
+                    code: "PYOXIDIZER_BUILD",
+                    message: e.to_string(),
+                    label: label.to_string(),
+                })
+            })?;
+
+        Ok(Value::new(NoneType::None))
+    }
+
     /// PythonExecutable.add_python_resource(resource)
     pub fn starlark_add_python_resource(
         &mut self,
@@ -528,23 +605,27 @@ impl PythonExecutable {
             .ok_or(ValueError::IncorrectParameterType)?;
 
         match resource.get_type() {
-            "PythonModuleSource" => {
+            FileValue::TYPE => {
+                let file = resource.downcast_ref::<FileValue>().unwrap();
+                self.add_file_data(context.deref(), label, file.deref())
+            }
+            PythonModuleSourceValue::TYPE => {
                 let module = resource.downcast_ref::<PythonModuleSourceValue>().unwrap();
                 self.add_python_module_source(context.deref(), label, module.deref())
             }
-            "PythonPackageResource" => {
+            PythonPackageResourceValue::TYPE => {
                 let r = resource
                     .downcast_ref::<PythonPackageResourceValue>()
                     .unwrap();
                 self.add_python_package_resource(context.deref(), label, r.deref())
             }
-            "PythonPackageDistributionResource" => {
+            PythonPackageDistributionResourceValue::TYPE => {
                 let r = resource
                     .downcast_ref::<PythonPackageDistributionResourceValue>()
                     .unwrap();
                 self.add_python_package_distribution_resource(context.deref(), label, r.deref())
             }
-            "PythonExtensionModule" => {
+            PythonExtensionModuleValue::TYPE => {
                 let module = resource
                     .downcast_ref::<PythonExtensionModuleValue>()
                     .unwrap();
@@ -574,7 +655,7 @@ impl PythonExecutable {
     /// PythonExecutable.to_embedded_resources()
     pub fn starlark_to_embedded_resources(&self) -> ValueResult {
         Ok(Value::new(PythonEmbeddedResources {
-            exe: self.exe.clone_box(),
+            exe: self.exe.clone_trait(),
         }))
     }
 
@@ -948,6 +1029,38 @@ mod tests {
         assert_eq!(x.inner.name, "foo");
         assert!(!x.inner.is_package);
         assert_eq!(x.inner.source.resolve().unwrap(), b"# foo");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_windows_subsystem() -> Result<()> {
+        let mut env = StarlarkEnvironment::new_with_exe()?;
+
+        let value = env.eval("exe.windows_subsystem")?;
+        assert_eq!(value.get_type(), "string");
+        assert_eq!(value.to_string(), "console");
+
+        let value = env.eval("exe.windows_subsystem = 'windows'; exe.windows_subsystem")?;
+        assert_eq!(value.get_type(), "string");
+        assert_eq!(value.to_string(), "windows");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tcl_files_path() -> Result<()> {
+        let mut env = StarlarkEnvironment::new_with_exe()?;
+
+        let value = env.eval("exe.tcl_files_path")?;
+        assert_eq!(value.get_type(), "NoneType");
+
+        let value = env.eval("exe.tcl_files_path = 'lib'; exe.tcl_files_path")?;
+        assert_eq!(value.get_type(), "string");
+        assert_eq!(value.to_string(), "lib");
+
+        let value = env.eval("exe.tcl_files_path = None; exe.tcl_files_path")?;
+        assert_eq!(value.get_type(), "NoneType");
 
         Ok(())
     }

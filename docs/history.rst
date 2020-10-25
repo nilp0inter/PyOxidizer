@@ -9,6 +9,7 @@ Work on PyOxidizer started in November 2018 by Gregory Szorc.
 Blog Posts
 ==========
 
+* `Announcing the 0.9 Release of PyOxidizer <https://gregoryszorc.com/blog/2020/10/18/announcing-the-0.9-release-of-pyoxidizer/>`_ (2020-10-18)
 * `Announcing the 0.8 Release of PyOxidizer <https://gregoryszorc.com/blog/2020/10/12/announcing-the-0.8-release-of-pyoxidizer/>`_ (2020-10-12)
 * `Using Rust to Power Python Importing with oxidized_importer <https://gregoryszorc.com/blog/2020/05/10/using-rust-to-power-python-importing-with-oxidized_importer/>`_ (2020-05-10)
 * `PyOxidizer 0.7 <https://gregoryszorc.com/blog/2020/04/09/pyoxidizer-0.7/>`_ (2020-04-09)
@@ -23,12 +24,70 @@ Blog Posts
 Version History
 ===============
 
-.. _version_0_9_0:
+.. _version_0_10_0:
 
-0.9.0-pre
----------
+0.10.0
+------
 
 Not yet released.
+
+Backwards Compatibility Notes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* A lot of unused Rust functions for running Python code have been
+  removed from the ``pyembed`` crate. The deleted code has not been used
+  since the ``PyConfig`` data structure was adopted for running code during
+  interpreter initialization. The deleted code was reimplementing
+  functionality in CPython and much of it was of questionable quality.
+* The built-in Python distributions have been updated to use version
+  ``6`` of the standalone distribution format. PyOxidizer only recognizes
+  version ``6`` distributions.
+* The ``pyembed::OxidizedPythonInterpreterConfig`` Rust struct now contains
+  a ``tcl_library`` field to control the value of the `TCL_LIBRARY` environment
+  variable.
+* The ``pyembed::OxidizedPythonInterpreterConfig`` Rust struct no longer has
+  a ``run_mode`` field.
+* The ``PythoninterpreterConfig`` Starlark type no longer has a ``run_mode``
+  attribute. To define what code to run at interpreter startup, populate a
+  ``run_*`` attribute or leave all ``None`` with ``.parse_argv = True`` (the
+  default for ``profile = "python"``) to start a REPL.
+
+Bug Fixes
+^^^^^^^^^
+
+* Fixed a broken documentation example for ``glob()``. (#300)
+* Fixed a bug where generated Rust code for `Option<PathBuf>` interpreter
+  configuration fields was not being generated correctly.
+
+New Features
+^^^^^^^^^^^^
+
+* The ``PythonExecutable`` Starlark type now exposes a
+  ``windows_subsystem`` attribute to control the value of Rust's
+  ``#![windows_subsystem = "..."]`` attribute. Setting this to ``windows``
+  prevents Windows executables from opening a console window when run. (#216)
+* The ``PythonExecutable`` Starlark type now exposes a ``tcl_files_path``
+  attribute to define a directory to install tcl/tk support files into.
+  Setting this attribute enables the use of the ``tkinter`` Python module
+  with compatible Python distributions. (#25)
+
+Other Relevant Changes
+^^^^^^^^^^^^^^^^^^^^^^
+
+* The Starlark types with special *build* or *run* behavior are now
+  explicitly documented.
+* The list of glibc and GCC versions used by popular Linux distributions
+  has been updated.
+* The built-in Linux and macOS Python distributions are now compiled with
+  LLVM/Clang 11 (as opposed to 10).
+* The built-in Python distributions now use pip 20.2.4 and setuptools 50.3.2.
+
+.. _version_0_9_0:
+
+0.9.0
+-----
+
+Released October 18, 2020.
 
 Backwards Compatibility Notes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -37,10 +96,27 @@ Backwards Compatibility Notes
   an ``argv`` field that can be used to control the population of
   ``sys.argv``.
 * The ``pyembed::OxidizedPythonInterpreterConfig`` Rust struct now contains
-  an ``isolated_auto_set_path_configuration`` field that can be used to
-  disable the automatic run-time population of *path configuration* fields.
+  a ``set_missing_path_configuration`` field that can be used to
+  control the automatic run-time population of missing *path configuration*
+  fields.
 * The ``configure_locale`` interpreter configuration setting is enabled
   by default. (#294)
+* The ``pyembed::OxidizedPythonInterpreterConfig`` Rust struct now contains
+  an ``exe`` field holding the path of the currently running executable.
+* At run-time, the ``program_name`` and ``home`` fields of the embedded
+  Python interpreter's path configuration are now always set to the
+  currently running executable and its directory, respectively, unless
+  explicit values have been provided.
+* The packed resource data version has changed from 2 to 3 in order to
+  support storing arbitrary file data. Support for reading and writing
+  version 2 has been removed. Packed resources blobs will need to be
+  regenerated in order to be compatible with new versions of PyOxidizer.
+* The ``pyembed::OxidizedPythonInterpreterConfig`` Rust struct had its
+  ``packed_resources`` field changed from ``Option<&'a [u8]>`` to
+  ``Vec<&'a [u8]>`` so multiple resource inputs can be specified.
+* The ``PythonDistribution`` Starlark type no longer has
+  ``extension_modules()``, ``package_resources()`` and ``source_modules()``
+  methods. Use ``PythonDistribution.python_resources()`` instead.
 
 New Features
 ^^^^^^^^^^^^
@@ -48,6 +124,30 @@ New Features
 * A ``print(*args)`` function is now exposed to Starlark. This function is
   documented as a Starlark built-in but isn't provided by the Rust Starlark
   implementation by default. So we've implemented it ourselves. (#292)
+* The new ``pyoxidizer find-resources`` command can be used to invoke
+  PyOxidizer's code for scanning files for resources. This command can be
+  used to debug and triage bugs related to PyOxidizer's custom code for
+  finding and handling resources.
+* Executables built on Windows now embed an application manifest that enables
+  long paths support. (#197)
+* The Starlark ``PythonPackagingPolicy`` type now exposes an ``allow_files``
+  attribute controlling whether files can be added as resources.
+* The Starlark ``PythonPackagingPolicy`` type now exposes
+  ``file_scanner_classify_files`` and ``file_scanner_emit_files`` attributes
+  controlling whether file scanning attempts to classify files and whether
+  generic file instances are emitted, respectively.
+* The Starlark ``PythonPackagingPolicy`` type now exposes
+  ``include_classified_resources`` and ``include_file_resources`` attributes
+  to control whether certain classes of resources have their ``add_include``
+  attribute set by default.
+* The Starlark ``PythonPackagingPolicy`` type now has a
+  ``set_resources_handling_mode()`` method to quickly apply a mode for
+  resource handling.
+* The Starlark ``PythonDistribution`` type now has a ``python_resources()``
+  method for obtaining all Python resources associated with the distribution.
+* Starlark ``File`` instances can now be added to resource collections via
+  ``PythonExecutable.add_python_resource()`` and
+  ``PythonExecutable.add_python_resources()``.
 
 Bug Fixes
 ^^^^^^^^^
@@ -65,6 +165,9 @@ Bug Fixes
   default ``.profile`` value is ``isolated``). This results in Python's
   encodings being more reasonable by default, which helps ensure
   non-ASCII arguments are interpreted properly. (#294)
+* Properly serialize ``module_search_paths`` to Rust code. Before, attempting
+  to set ``PythonInterpreterConfig.module_search_paths`` in Starlark would
+  result in malformed Rust code being generated. (#298)
 
 Other Relevant Changes
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -83,6 +186,13 @@ Other Relevant Changes
 * When PyOxidizer invokes a subprocess and logs its output, stderr
   is now redirected to stdout and logged as a unified stream. Previously,
   stdout was logged and stderr went to the parent process stderr.
+* There now exists :ref:`documentation <packaging_python_executable>`
+  on how to create an executable that behaves like ``python``.
+* The documentation on binary portability has been overhauled to go in
+  much greater detail.
+* The list of standard library test packages is now obtained from the
+  Python distribution metadata instead of a hardcoded list in PyOxidizer's
+  source code.
 
 .. _version_0_8_0:
 

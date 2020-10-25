@@ -346,6 +346,11 @@ impl<'python, 'interpreter, 'resources> MainPythonInterpreter<'python, 'interpre
             .ensure_origin()
             .map_err(|e| NewInterpreterError::Simple(e))?;
         let origin_string = origin.display().to_string();
+
+        if let Some(tcl_library) = self.config.resolve_tcl_library()? {
+            std::env::set_var("TCL_LIBRARY", tcl_library);
+        }
+
         self.config
             .resolve_module_search_paths()
             .map_err(|e| NewInterpreterError::Simple(e))?;
@@ -434,7 +439,7 @@ impl<'python, 'interpreter, 'resources> MainPythonInterpreter<'python, 'interpre
 
             if let Some(ref mut resources_state) = self.resources_state {
                 resources_state
-                    .load(self.config.packed_resources)
+                    .load(&self.config.packed_resources)
                     .map_err(|err| NewInterpreterError::Simple(err))?;
 
                 let oxidized_importer = py.import(OXIDIZED_IMPORTER_NAME_STR).map_err(|err| {
@@ -602,17 +607,8 @@ impl<'python, 'interpreter, 'resources> MainPythonInterpreter<'python, 'interpre
     /// `OxidizedPythonInterpreterConfig.run` and return an integer suitable
     /// for use as a process exit code.
     ///
-    /// The `PythonRunMode::Eval`, `PythonRunMode::File`, and
-    /// `PythonRunMode::Module`, and `PythonRunMode::Repl` run modes are
-    /// evaluated via `Py_RunMain()`. `PythonRunMode::None` simply returns 0.
-    ///
     /// `Py_RunMain` is the most robust mechanism to run code, files, or
     /// modules, as `Py_RunMain()` invokes the same APIs that `python` would.
-    /// By contrast, the `run()`, `run_module_as_main()`, `run_code()`,
-    /// `run_file()`, and `run_repl()` functions in the `python_eval` module
-    /// reimplement functionality and may behave subtly different from what
-    /// `python` would do. If you want the evaluation to behave like `python`,
-    /// you should call this function.
     ///
     /// A downside to calling this function is that `Py_RunMain()` will finalize
     /// the interpreter and only gives you an exit code: there is no opportunity

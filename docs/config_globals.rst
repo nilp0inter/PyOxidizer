@@ -18,8 +18,14 @@ Global Types
 
 PyOxidizer's Starlark dialect defines the following custom types:
 
+:ref:`config_type_file`
+   Represents a filesystem path and content.
+
 :ref:`config_type_file_content`
    Represents the content of a file on the filesystem.
+
+   (Unlike :ref:`config_type_file`, this does not track the filename
+   internally.)
 
 :ref:`config_type_file_manifest`
    Represents a mapping of filenames to file content.
@@ -121,3 +127,31 @@ PyOxidizer's Starlark dialect defines the following global functions:
 
 :any:`set_build_path() <config_set_build_path>`
    Set the filesystem path to use for writing files during evaluation.
+
+.. _config_types_with_target_behavior:
+
+Types with Target Behavior
+==========================
+
+As described in :ref:`config_processing_targets`, a function registered
+as a named target can return a type that has special *build* or *run*
+behavior.
+
+The following types have special behavior registered:
+
+:ref:`config_type_file_manifest`
+   Build behavior is to materialize all files in the file manifest.
+
+   Run behavior is to run the last added :ref:`config_type_python_executable`
+   if available, falling back to an executable file installed by the manifest
+   if there is exactly 1 executable file.
+
+:ref:`config_type_python_embedded_resources`
+   Build behavior is to write out files this type represents.
+
+   There is no run behavior.
+
+:ref:`config_type_python_executable`
+   Build behavior is to build the executable file.
+
+   Run behavior is to run that built executable.

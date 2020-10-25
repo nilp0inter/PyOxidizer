@@ -100,8 +100,6 @@ mod osutils;
 mod package_metadata;
 #[cfg(not(library_mode = "extension"))]
 mod pyalloc;
-#[cfg(not(library_mode = "extension"))]
-mod python_eval;
 #[allow(unused_variables, clippy::transmute_ptr_to_ptr, clippy::zero_ptr)]
 mod python_resource_collector;
 #[allow(clippy::transmute_ptr_to_ptr, clippy::zero_ptr)]
@@ -122,12 +120,6 @@ pub use crate::config::{ExtensionModule, OxidizedPythonInterpreterConfig};
 #[allow(unused_imports)]
 pub use crate::interpreter::{MainPythonInterpreter, NewInterpreterError};
 
-#[cfg(not(library_mode = "extension"))]
-#[allow(unused_imports)]
-pub use crate::python_eval::{
-    run, run_and_handle_error, run_code, run_file, run_module_as_main, run_repl,
-};
-
 #[cfg(library_mode = "extension")]
 pub use crate::importer::PyInit_oxidized_importer;
 
@@ -136,7 +128,7 @@ pub use crate::importer::PyInit_oxidized_importer;
 pub use python_packaging::{
     interpreter::{
         Allocator, BytesWarning, CheckHashPYCsMode, CoerceCLocale, PythonInterpreterConfig,
-        PythonInterpreterProfile, PythonRawAllocator, PythonRunMode, TerminfoResolution,
+        PythonInterpreterProfile, PythonRawAllocator, TerminfoResolution,
     },
     resource::BytecodeOptimizationLevel,
 };

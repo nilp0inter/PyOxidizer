@@ -9,9 +9,8 @@ use {
         binary::{LibpythonLinkMode, PythonBinaryBuilder},
         config::{default_raw_allocator, EmbeddedPythonConfig},
         distribution::{
-            is_stdlib_test_package, resolve_python_distribution_from_location,
-            BinaryLibpythonLinkMode, DistributionExtractLock, PythonDistribution,
-            PythonDistributionLocation,
+            resolve_python_distribution_from_location, BinaryLibpythonLinkMode,
+            DistributionExtractLock, PythonDistribution, PythonDistributionLocation,
         },
         distutils::prepare_hacked_distutils,
         standalone_builder::StandalonePythonExecutableBuilder,
@@ -25,9 +24,7 @@ use {
     python_packaging::{
         bytecode::{BytecodeCompiler, PythonBytecodeCompiler},
         filesystem_scanning::{find_python_resources, walk_tree_files},
-        interpreter::{
-            PythonInterpreterConfig, PythonInterpreterProfile, PythonRunMode, TerminfoResolution,
-        },
+        interpreter::{PythonInterpreterConfig, PythonInterpreterProfile, TerminfoResolution},
         location::ConcreteResourceLocation,
         module_util::{is_package_from_path, PythonModuleSuffixes},
         policy::PythonPackagingPolicy,
@@ -160,6 +157,7 @@ struct PythonJsonMain {
     optimizations: String,
     python_tag: String,
     python_abi_tag: Option<String>,
+    python_config_vars: HashMap<String, String>,
     python_platform_tag: String,
     python_implementation_cache_tag: String,
     python_implementation_hex_version: u64,
@@ -168,6 +166,7 @@ struct PythonJsonMain {
     python_version: String,
     python_major_minor_version: String,
     python_paths: HashMap<String, String>,
+    python_paths_abstract: HashMap<String, String>,
     python_exe: String,
     python_stdlib_test_packages: Vec<String>,
     python_suffixes: HashMap<String, Vec<String>>,
@@ -202,9 +201,9 @@ fn parse_python_json(path: &Path) -> Result<PythonJsonMain> {
                 .as_str()
                 .ok_or_else(|| anyhow!("unable to parse version as a string"))?;
 
-            if version != "5" {
+            if version != "6" {
                 return Err(anyhow!(
-                    "expected version 5 standalone distribution; found version {}",
+                    "expected version 6 standalone distribution; found version {}",
                     version
                 ));
             }
@@ -375,6 +374,9 @@ pub struct StandaloneDistribution {
     /// Path to Python standard library.
     pub stdlib_path: PathBuf,
 
+    /// Python packages in the standard library providing tests.
+    stdlib_test_packages: Vec<String>,
+
     /// How libpython is linked in this distribution.
     link_mode: StandaloneDistributionLinkMode,
 
@@ -395,7 +397,10 @@ pub struct StandaloneDistribution {
     pub license_path: Option<PathBuf>,
 
     /// Path to Tcl library files.
-    pub tcl_library_path: Option<PathBuf>,
+    tcl_library_path: Option<PathBuf>,
+
+    /// Directories under `tcl_library_path` containing tcl files.
+    tcl_library_paths: Option<Vec<String>>,
 
     /// Object files providing the core Python implementation.
     ///
@@ -826,6 +831,8 @@ impl StandaloneDistribution {
             &stdlib_path,
             &pi.python_implementation_cache_tag,
             &module_suffixes,
+            false,
+            true,
         ) {
             match entry? {
                 PythonResource::PackageResource(resource) => {
@@ -853,7 +860,14 @@ impl StandaloneDistribution {
                         return Err(anyhow!("should not have received in-memory source data"))
                     }
                 },
-                _ => {}
+
+                PythonResource::ModuleBytecodeRequest(_) => {}
+                PythonResource::ModuleBytecode(_) => {}
+                PythonResource::PackageDistributionResource(_) => {}
+                PythonResource::ExtensionModule(_) => {}
+                PythonResource::EggFile(_) => {}
+                PythonResource::PathExtension(_) => {}
+                PythonResource::File(_) => {}
             };
         }
 
@@ -882,6 +896,7 @@ impl StandaloneDistribution {
             version: pi.python_version.clone(),
             python_exe: python_exe_path(dist_dir)?,
             stdlib_path,
+            stdlib_test_packages: pi.python_stdlib_test_packages,
             link_mode,
             python_symbol_visibility: pi.python_symbol_visibility,
             extension_module_loading: pi.python_extension_module_loading,
@@ -891,10 +906,10 @@ impl StandaloneDistribution {
                 None => None,
             },
             tcl_library_path: match pi.tcl_library_path {
-                Some(ref path) => Some(PathBuf::from(path)),
+                Some(ref path) => Some(dist_dir.join("python").join(path)),
                 None => None,
             },
-
+            tcl_library_paths: pi.tcl_library_paths.clone(),
             extension_modules,
             frozen_c,
             includes,
@@ -1035,8 +1050,8 @@ impl StandaloneDistribution {
 }
 
 impl PythonDistribution for StandaloneDistribution {
-    fn clone_box(&self) -> Box<dyn PythonDistribution> {
-        Box::new(self.clone())
+    fn clone_trait(&self) -> Arc<dyn PythonDistribution> {
+        Arc::new(self.clone())
     }
 
     fn target_triple(&self) -> &str {
@@ -1149,6 +1164,10 @@ impl PythonDistribution for StandaloneDistribution {
         Ok(self.module_suffixes.clone())
     }
 
+    fn stdlib_test_packages(&self) -> Vec<String> {
+        self.stdlib_test_packages.clone()
+    }
+
     fn create_bytecode_compiler(&self) -> Result<Box<dyn PythonBytecodeCompiler>> {
         Ok(Box::new(BytecodeCompiler::new(&self.python_exe)?))
     }
@@ -1192,7 +1211,6 @@ impl PythonDistribution for StandaloneDistribution {
             oxidized_importer: true,
             filesystem_importer: false,
             terminfo_resolution: TerminfoResolution::Dynamic,
-            run_mode: PythonRunMode::Repl,
             ..embedded_default
         })
     }
@@ -1206,12 +1224,12 @@ impl PythonDistribution for StandaloneDistribution {
         libpython_link_mode: BinaryLibpythonLinkMode,
         policy: &PythonPackagingPolicy,
         config: &EmbeddedPythonConfig,
-        host_distribution: Option<Arc<Box<dyn PythonDistribution>>>,
+        host_distribution: Option<Arc<dyn PythonDistribution>>,
     ) -> Result<Box<dyn PythonBinaryBuilder>> {
         // TODO can we avoid these clones?
-        let target_distribution = Arc::new(Box::new(self.clone()));
-        let host_distribution: Arc<Box<dyn PythonDistribution>> =
-            host_distribution.unwrap_or_else(|| Arc::new(Box::new(self.clone())));
+        let target_distribution = Arc::new(self.clone());
+        let host_distribution: Arc<dyn PythonDistribution> =
+            host_distribution.unwrap_or_else(|| Arc::new(self.clone()));
 
         let builder = StandalonePythonExecutableBuilder::from_distribution(
             host_distribution,
@@ -1227,51 +1245,44 @@ impl PythonDistribution for StandaloneDistribution {
         Ok(builder as Box<dyn PythonBinaryBuilder>)
     }
 
-    fn iter_extension_modules<'a>(
-        &'a self,
-    ) -> Box<dyn Iterator<Item = &'a PythonExtensionModule> + 'a> {
-        Box::new(
-            self.extension_modules
-                .iter()
-                .map(|(_, exts)| exts.iter())
-                .flatten(),
-        )
-    }
-
-    fn source_modules(&self) -> Result<Vec<PythonModuleSource>> {
-        self.py_modules
+    fn python_resources<'a>(&self) -> Vec<PythonResource<'a>> {
+        let extension_modules = self
+            .extension_modules
             .iter()
-            .map(|(name, path)| {
-                let is_package = is_package_from_path(&path);
+            .map(|(_, exts)| exts.iter().map(|e| PythonResource::from(e.to_owned())))
+            .flatten();
 
-                Ok(PythonModuleSource {
-                    name: name.clone(),
-                    source: DataLocation::Path(path.clone()),
-                    is_package,
-                    cache_tag: self.cache_tag.clone(),
-                    is_stdlib: true,
-                    is_test: is_stdlib_test_package(name),
+        let module_sources = self.py_modules.iter().map(|(name, path)| {
+            PythonResource::from(PythonModuleSource {
+                name: name.clone(),
+                source: DataLocation::Path(path.clone()),
+                is_package: is_package_from_path(&path),
+                cache_tag: self.cache_tag.clone(),
+                is_stdlib: true,
+                is_test: self.is_stdlib_test_package(name),
+            })
+        });
+
+        let resource_datas = self
+            .resources
+            .iter()
+            .map(|(package, inner)| {
+                inner.iter().map(move |(name, path)| {
+                    PythonResource::from(PythonPackageResource {
+                        leaf_package: package.clone(),
+                        relative_name: name.clone(),
+                        data: DataLocation::Path(path.clone()),
+                        is_stdlib: true,
+                        is_test: self.is_stdlib_test_package(&package),
+                    })
                 })
             })
-            .collect()
-    }
+            .flatten();
 
-    fn resource_datas(&self) -> Result<Vec<PythonPackageResource>> {
-        let mut res = Vec::new();
-
-        for (package, inner) in self.resources.iter() {
-            for (name, path) in inner.iter() {
-                res.push(PythonPackageResource {
-                    leaf_package: package.clone(),
-                    relative_name: name.clone(),
-                    data: DataLocation::Path(path.clone()),
-                    is_stdlib: true,
-                    is_test: is_stdlib_test_package(&package),
-                });
-            }
-        }
-
-        Ok(res)
+        extension_modules
+            .chain(module_sources)
+            .chain(resource_datas)
+            .collect::<Vec<PythonResource<'a>>>()
     }
 
     /// Ensure pip is available to run in the distribution.
@@ -1319,6 +1330,43 @@ impl PythonDistribution for StandaloneDistribution {
                 .extension_module_loading
                 .contains(&"shared-library".to_string())
     }
+
+    fn tcl_files(&self) -> Result<Vec<(PathBuf, DataLocation)>> {
+        let mut res = vec![];
+
+        if let Some(root) = &self.tcl_library_path {
+            if let Some(paths) = &self.tcl_library_paths {
+                for subdir in paths {
+                    for entry in walkdir::WalkDir::new(root.join(subdir))
+                        .sort_by(|a, b| a.file_name().cmp(b.file_name()))
+                        .into_iter()
+                    {
+                        let entry = entry?;
+
+                        let path = entry.path();
+
+                        if path.is_dir() {
+                            continue;
+                        }
+
+                        let rel_path = path.strip_prefix(&root)?;
+
+                        res.push((
+                            rel_path.to_path_buf(),
+                            DataLocation::Path(path.to_path_buf()),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(res)
+    }
+
+    fn tcl_library_path_directory(&self) -> Option<String> {
+        // TODO this should probably be exposed from the JSON metadata.
+        Some("tcl8.6".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -1329,18 +1377,39 @@ pub mod tests {
     fn test_stdlib_annotations() -> Result<()> {
         let distribution = get_default_distribution()?;
 
-        for module in distribution.source_modules()? {
-            assert!(module.is_stdlib);
+        for resource in distribution.python_resources() {
+            match resource {
+                PythonResource::ModuleSource(module) => {
+                    assert!(module.is_stdlib);
 
-            if module.name.starts_with("test") {
-                assert!(module.is_test);
+                    if module.name.starts_with("test") {
+                        assert!(module.is_test);
+                    }
+                }
+                PythonResource::PackageResource(r) => {
+                    assert!(r.is_stdlib);
+                    if r.leaf_package.starts_with("test") {
+                        assert!(r.is_test);
+                    }
+                }
+                _ => (),
             }
         }
 
-        for resource in distribution.resource_datas()? {
-            assert!(resource.is_stdlib);
-            if resource.leaf_package.starts_with("test") {
-                assert!(resource.is_test);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tcl_files() -> Result<()> {
+        for dist in get_all_standalone_distributions()? {
+            let tcl_files = dist.tcl_files()?;
+
+            if dist.target_triple().contains("pc-windows")
+                && !dist.is_extension_module_file_loadable()
+            {
+                assert!(tcl_files.is_empty());
+            } else {
+                assert!(!tcl_files.is_empty());
             }
         }
 
